@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# NAME: Case 3 — Root with Zygisk LSPosed HMA
+# Target state: modules ON, Enforce DenyList ON, target IN denylist (all processes).
+# Then open the LSPosed manager via the module "Action" button, and open the target app.
+#   env: TARGET_PKG=<pkg>   REBOOT=1   DL_SEARCH=<term>
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/../lib/common.sh"
+detect_size
+: "${TARGET_PKG:?Case 3 needs TARGET_PKG}"
+
+apply_state ON ON ON "$TARGET_PKG" "${DL_SEARCH:-$TARGET_PKG}"
+
+# open the LSPosed manager via the module "Action" button (located by id, not coords)
+lsposed_action
+fg="$(focus_now)"; echo "  foreground: $fg"
+case "$fg" in *lsposed*) echo "  LSPosed manager opened ✓";; *) echo "  WARN: LSPosed not detected" >&2;; esac
+
+open_target
+echo "case3 (Root with Zygisk LSPosed HMA) done on $DEV_NAME"
+verdict_exit
