@@ -297,6 +297,29 @@ def install_and_launch(serial, files, info, is_bundle, native):
     print(f"Launching {package} inside {serial} ...")
     adb(serial, "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
     print("Case 8 complete: clean install and launch requested. Emulator left running.")
+    reopen_loop(serial, package)
+
+
+def reopen_loop(serial, package):
+    """Offer to relaunch, mirroring common.sh's reopen_loop for the shell cases.
+
+    Emulator detection can hinge on a cold start, so one launch is often not the whole
+    answer, and relaunching is far cheaper than re-running the install."""
+    while True:
+        try:
+            answer = input(f"  open {package} again? [y/N]: ").strip().lower()
+        except EOFError:
+            print()
+            return
+        if answer not in ("y", "yes"):
+            return
+        try:
+            adb(serial, "shell", "monkey", "-p", package,
+                "-c", "android.intent.category.LAUNCHER", "1")
+            print(f"  launched {package}")
+        except (RuntimeError, subprocess.SubprocessError) as error:
+            print(f"  could not launch: {error}", file=sys.stderr)
+            return
 
 
 def main():

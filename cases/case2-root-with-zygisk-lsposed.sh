@@ -12,5 +12,6 @@ detect_size
 
 apply_state ON OFF OFF "$TARGET_PKG" "${DL_SEARCH:-$TARGET_PKG}"
 open_target
-echo "case2 (Root with Zygisk and LSPosed) done on $DEV_NAME"
+echo "case2 (Root with Zygisk and LSPosed) done on $DEV_SERIAL"
+reopen_loop
 verdict_exit

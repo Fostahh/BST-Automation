@@ -89,6 +89,12 @@ Useful environment variables:
 | `MOD_ZNEXT` / `MOD_LSPOSED` | the module titles as the Modules screen shows them, for cases 1–3 |
 | `SKIP_PREFLIGHT` | skip the dependency checks |
 
+Every case ends by offering to launch the app again (`open <pkg> again? [y/N]`), as
+often as you like. Detection can hinge on a cold start or on what the app cached last
+run, and relaunching is far cheaper than re-running the scenario, which would re-apply
+the device state and may reboot. Case 4 has its own richer version of this — it replays
+the chosen frida hook without restarting the server.
+
 Retrieved and patched APKs land in `extracted/` (or `$EXTRACTED_DIR`).
 
 ## Layout

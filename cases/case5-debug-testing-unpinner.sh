@@ -146,5 +146,6 @@ echo "7) opening $PKG ..."
 wake
 launch "$PKG"                                        # monkey LAUNCHER intent
 
-echo "case5 (Debug Testing — android-unpinner) done on ${DEV_NAME:-$DEV_SERIAL}"
+reopen_loop "$PKG"
+echo "case5 (Debug Testing — android-unpinner) done on $DEV_SERIAL"
 exit 0

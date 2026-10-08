@@ -62,5 +62,8 @@ echo "== GBox =="
 echo "9) opening GBox ($GBOX_PKG) — do the rest manually"
 open_app "$GBOX_PKG"
 
-echo "case6 (Virtual Environment) done on ${DEV_NAME:-$DEV_SERIAL}"
+# The target is cloned INTO the virtual environments here, so the thing worth reopening
+# is GBox (where the clone lives), not the original package.
+reopen_loop "$GBOX_PKG"
+echo "case6 (Virtual Environment) done on $DEV_SERIAL"
 exit 0

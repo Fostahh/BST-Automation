@@ -19,5 +19,6 @@ fg="$(focus_now)"; echo "  foreground: $fg"
 case "$fg" in *lsposed*) echo "  LSPosed manager opened ✓";; *) echo "  WARN: LSPosed not detected" >&2;; esac
 
 open_target
-echo "case3 (Root with Zygisk LSPosed HMA) done on $DEV_NAME"
+echo "case3 (Root with Zygisk LSPosed HMA) done on $DEV_SERIAL"
+reopen_loop
 verdict_exit

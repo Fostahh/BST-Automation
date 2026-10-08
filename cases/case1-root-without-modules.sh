@@ -12,5 +12,6 @@ detect_size
 
 apply_state OFF OFF OFF "$TARGET_PKG" "${DL_SEARCH:-$TARGET_PKG}"
 open_target
-echo "case1 (Root-Without Modules) done on $DEV_NAME"
+echo "case1 (Root-Without Modules) done on $DEV_SERIAL"
+reopen_loop
 verdict_exit

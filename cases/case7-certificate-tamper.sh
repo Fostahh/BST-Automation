@@ -226,6 +226,7 @@ c7_main() {
   c7_sign "$MT_APK_PATH" || return 1
   c7_install || return 1
   echo "Case 7 complete: signed build installed and launch requested for $PKG."
+  reopen_loop "$PKG"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then c7_main; fi

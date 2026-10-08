@@ -312,21 +312,51 @@ enter_pin() {   # type a numeric PIN via keyevents (KEYCODE_0=7 .. KEYCODE_9=16)
 unlock() {
   inp keyevent 224; nap 0.8                 # WAKEUP
   swipr 0.5 0.80 0.5 0.25 200; nap 1.0      # reveal the PIN pad
-  if [ -z "${PIN:-}" ] && [ -t 0 ] && _keyguard_up; then
-    read -rsp "  PIN for $DEV_SERIAL (digits; not stored): " PIN || PIN=""
-    echo
-    export PIN                              # a later reboot in the same case reuses it
-  fi
+  if [ -z "${PIN:-}" ]; then ask_pin_or_manual || true; fi
   if [ -n "${PIN:-}" ]; then enter_pin "$PIN"; nap 0.4; inp keyevent 66; nap "$NAP_MED"; fi
 }
-# _keyguard_up : true only when the policy dump says a keyguard field is showing. Unknown
-# counts as NOT up, so an unreadable dump cannot make the run stop and ask for nothing.
-_keyguard_up() {
-  adbx shell dumpsys window policy 2>/dev/null | tr -d '\r' | awk '
+# device_lock_state : "locked" | "unlocked", or rc1 when the dump says neither.
+# The single reader for this; device-ready.sh used to carry a near-identical copy.
+# showingAndNotOccluded/inputRestricted are ignored: neither alone proves a lock.
+device_lock_state() {
+  local policy
+  policy="$(adbx shell dumpsys window policy)" || return 1
+  printf '%s\n' "$policy" | tr -d '\r' | awk '
     /^[[:space:]]*(showing|mIsShowing|mKeyguardShowing|isStatusBarKeyguard|mShowingLockscreen)=(true|false)([[:space:]]|$)/ {
-      if ($0 ~ /=true([[:space:]]|$)/) up = 1
+      seen=1
+      if ($0 ~ /=(true)([[:space:]]|$)/) locked=1
     }
-    END { exit up ? 0 : 1 }'
+    END {
+      if (!seen) exit 1
+      print locked ? "locked" : "unlocked"
+    }'
+}
+# _keyguard_up : true only when the dump positively says a keyguard is showing. An
+# unreadable dump counts as NOT up, so it cannot make the run stop and ask for nothing.
+_keyguard_up() { [ "$(device_lock_state 2>/dev/null)" = locked ]; }
+
+# ask_pin_or_manual : fill $PIN, or let the runner unlock the phone by hand.
+#   rc 0 + PIN set    -> type this PIN
+#   rc 0 + PIN empty  -> the device is already unlocked, nothing left to do
+#   rc 1              -> give up (no terminal, no input, or unreadable keyguard)
+# A blank answer means "I just unlocked it myself", so the keyguard is re-read instead of
+# the run being abandoned, and the question comes back if it is still up. Exits on a
+# failed read: at EOF read keeps returning empty and re-asking would spin forever.
+ask_pin_or_manual() {
+  while [ -z "${PIN:-}" ]; do
+    _keyguard_up || { PIN=""; return 0; }          # unlocked in the meantime
+    [ -t 0 ] || { echo "  !! locked, no PIN, and no terminal to ask on." >&2; return 1; }
+    if ! read -rsp "  PIN for $DEV_SERIAL (digits; blank = I unlocked it by hand): " PIN; then
+      echo; echo "  !! no input; device still locked." >&2; return 1
+    fi
+    echo
+    case "$PIN" in
+      '')        echo "  checking ..." ;;
+      *[!0-9]*)  echo "  digits only." >&2; PIN="" ;;
+      *)         export PIN; return 0 ;;           # cases 2/3 reboot and reuse it
+    esac
+  done
+  return 0
 }
 # Each boot has a unique kernel boot_id; a change in it means the device rebooted.
 boot_id()   { adbx shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r'; }
@@ -621,6 +651,28 @@ apply_state() {
   if [ "$defer" = 1 ]; then set_denylist_state "$wenf" "$wdl" "$pkg" "$search"; fi
 
   verify_modules "$wmod" "$modchg"
+}
+
+# reopen_loop [package] : offer to launch the target again, as often as wanted.
+#
+# Generalises case 4's hook-again loop. A RASP verdict is worth seeing more than once —
+# detection can hinge on a cold start, on timing, or on what the app cached last run — and
+# relaunching costs nothing, whereas re-running the scenario re-applies the whole device
+# state and may reboot. Always returns 0: this runs after the case's real work is done, so
+# declining it, or an EOF, is not a failure.
+reopen_loop() {
+  local pkg="${1:-${TARGET_PKG:-}}" ans
+  [ -n "$pkg" ] || return 0
+  while :; do
+    echo
+    read -rp "  open $pkg again? [y/N]: " ans || { echo; return 0; }
+    case "$ans" in
+      y|Y|yes|YES) ;;
+      *) return 0 ;;
+    esac
+    home; nap "$NAP_SHORT"; launch "$pkg"
+    echo "  launched $pkg"
+  done
 }
 
 # open_target : go home, then launch the target app (final step of every case)
