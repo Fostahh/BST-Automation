@@ -16,11 +16,13 @@ device_lock_state() {
     }'
 }
 
-# Runs in a subshell so a PIN read here stays in this process and never leaks into the
-# scenario's environment. Input routing is common.sh's job: inp -> inpx -> has_su, which
-# caches the one su probe this run needs. This function used to repeat that probe and
-# shadow `inp` with a byte-identical copy.
-ensure_device_unlocked() (
+# NOT a subshell. It used to be one, so that a PIN typed here could not escape — but
+# cases 2 and 3 reboot the device, and the post-reboot unlock() reads $PIN with no way to
+# ask for it, so the PIN had to be stored on disk for those cases to work at all. Keeping
+# it in this process and exporting it is what lets the PIN be typed instead of stored.
+# Input routing is common.sh's job: inp -> inpx -> has_su, which caches the one su probe
+# this run needs. This function used to repeat that probe and shadow `inp` with a copy.
+ensure_device_unlocked() {
   local state attempt
   state="$(device_lock_state)" || {
     echo "!! Cannot determine the lock state of ${DEV_NAME:-$DEV_SERIAL}; scenario not started." >&2
@@ -54,11 +56,12 @@ ensure_device_unlocked() (
     return 0
   fi
   if [ -z "${PIN:-}" ]; then
-    # No PIN configured: ask once, in this process only — nothing is written to disk.
-    # BST_PIN_<PROFILE> or lib/devices.local.sh can supply it for unattended runs.
+    # Ask once, in this process only — a PIN is never written to disk and never read
+     # from anywhere. The export carries it to the reboots in cases 2 and 3.
     if [ -t 0 ]; then
       read -rsp "  PIN for ${DEV_NAME:-$DEV_SERIAL} (digits; not stored): " PIN || PIN=""
       echo
+      export PIN              # cases 2/3 reboot and unlock() needs it, with nobody to ask
     fi
     case "${PIN:-}" in
       ''|*[!0-9]*)
@@ -78,6 +81,6 @@ ensure_device_unlocked() (
       return 0
     fi
   done
-  echo '!! Device is still locked or could not be verified. Check its profile PIN or unlock manually; scenario not started.' >&2
+  echo '!! Device is still locked or could not be verified. Unlock it by hand, then rerun.' >&2
   return 1
-)
+}

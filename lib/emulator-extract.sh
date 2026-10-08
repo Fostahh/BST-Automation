@@ -2,13 +2,11 @@
 # Internal Case 8 preparation step. Only this process targets the source phone.
 set -euo pipefail
 LIB8="$(cd "$(dirname "$0")" && pwd)"
-DEV_NAME="$1"
+DEV_SERIAL="$1"                             # an adb serial, chosen by the runner
 TARGET_PKG="$2"
 OUTPUT_DIR="$3"
-source "$LIB8/devices.sh"
-DEV_SERIAL="$(device_serial "$DEV_NAME")"
-PIN="$(device_pin "$DEV_NAME")"
-export DEV_NAME DEV_SERIAL PIN TARGET_PKG
+DEV_NAME="$DEV_SERIAL"
+export DEV_NAME DEV_SERIAL TARGET_PKG       # no PIN: device-ready.sh asks if it needs one
 source "$LIB8/common.sh"
 source "$LIB8/device-ready.sh"
 source "$LIB8/mtmanager.sh"

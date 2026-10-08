@@ -304,10 +304,29 @@ enter_pin() {   # type a numeric PIN via keyevents (KEYCODE_0=7 .. KEYCODE_9=16)
   for (( i=0; i<${#1}; i++ )); do d="${1:$i:1}"; codes="$codes $((7 + d))"; done
   inp keyevent $codes
 }
-unlock() {      # wake, reveal keyguard, enter $PIN (empty = no PIN)
+# unlock : wake, reveal the keyguard, type $PIN if there is one.
+# Asks for the PIN if it does not have one and the keyguard is still up. Cases 2 and 3
+# reboot, which brings the keyguard back; without this the only way to get past it was a
+# PIN stored on disk via BST_PIN_<PROFILE>, which no longer exists. The case runs as
+# `bash <case>` with stdin inherited, so there is a terminal here to ask on.
+unlock() {
   inp keyevent 224; nap 0.8                 # WAKEUP
   swipr 0.5 0.80 0.5 0.25 200; nap 1.0      # reveal the PIN pad
+  if [ -z "${PIN:-}" ] && [ -t 0 ] && _keyguard_up; then
+    read -rsp "  PIN for $DEV_SERIAL (digits; not stored): " PIN || PIN=""
+    echo
+    export PIN                              # a later reboot in the same case reuses it
+  fi
   if [ -n "${PIN:-}" ]; then enter_pin "$PIN"; nap 0.4; inp keyevent 66; nap "$NAP_MED"; fi
+}
+# _keyguard_up : true only when the policy dump says a keyguard field is showing. Unknown
+# counts as NOT up, so an unreadable dump cannot make the run stop and ask for nothing.
+_keyguard_up() {
+  adbx shell dumpsys window policy 2>/dev/null | tr -d '\r' | awk '
+    /^[[:space:]]*(showing|mIsShowing|mKeyguardShowing|isStatusBarKeyguard|mShowingLockscreen)=(true|false)([[:space:]]|$)/ {
+      if ($0 ~ /=true([[:space:]]|$)/) up = 1
+    }
+    END { exit up ? 0 : 1 }'
 }
 # Each boot has a unique kernel boot_id; a change in it means the device rebooted.
 boot_id()   { adbx shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r'; }

@@ -64,26 +64,12 @@ BANNER
 intro
 preflight || exit 1
 
-# --- 2) platform --------------------------------------------------------------
-# iOS is listed so the roadmap is visible, but there is nothing behind it yet: choosing
-# it says so and carries on with Android rather than dead-ending the run.
-choose_platform() {
-  local ans
-  echo "== Platform =="
-  echo "  1) Android   ready"
-  echo "  2) iOS       not implemented yet"
-  while :; do
-    read -rp "platform [1]: " ans || ans=""
-    case "${ans:-1}" in
-      1|android|Android|ANDROID) PLATFORM=android; return 0 ;;
-      2|ios|iOS|IOS|iPadOS|ipados)
-        echo "  iOS hasn't been developed yet — continuing with Android."
-        PLATFORM=android; return 0 ;;
-      *) echo "  choose 1 or 2." >&2 ;;
-    esac
-  done
-}
-choose_platform
+# --- 2) device, and the platform it implies -----------------------------------
+# Nothing is asked that can be observed. adb only ever sees Android, so an attached
+# device settles the platform; a single one is selected silently and several are listed
+# to choose from. iOS is looked for only when no Android device is found — an iPhone
+# paired to Xcode must not start asking questions in the middle of an Android run.
+pick_device || exit 1
 echo
 
 # --- 3) scenario --------------------------------------------------------------
@@ -133,36 +119,25 @@ export DELAY_SCALE
 # emulator and needs no phone, so it must not pass through the device prompt below.
 # lib/py/emulator-case.py asks for the source phone and the package itself.
 if [ "$(basename "$TARGET")" = case8-emulator.sh ]; then
+  # Hand over the device if one is attached (its automatic mode extracts from a phone);
+  # manual mode installs a local APK and needs none, which is why it runs before the
+  # device requirement below.
+  [ -n "$DEV_SERIAL" ] && export DEV_SERIAL DEV_NAME
   echo
   echo ">> running $(basename "$TARGET")  (chooses its own APK source)"
   echo
   exec bash "$TARGET"
 fi
 
-# --- 4) device (cases 1–7) ----------------------------------------------------
-echo "== Connected (adb) =="
-adb devices | sed '1d;/^$/d' || true
-echo
-echo "== Device profiles =="
-resolved=0
-for n in $DEVICE_NAMES; do
-  s="$(device_serial "$n" 2>/dev/null || true)"
-  [ -n "$s" ] && resolved=$((resolved + 1))
-  printf "  %-10s %s\n" "$n" "${s:-(not configured)}"
-done
-# Only explain the setup when it is actually needed. One attached device resolves any
-# profile name on its own, so nagging about devices.local.sh in that case is noise.
-if [ "$resolved" = 0 ]; then
-  echo
-  echo "  Nothing resolves. Either paste an adb serial from the list above, or name your"
-  echo "  phones in lib/devices.local.sh:  cp lib/devices.local.sh.example lib/devices.local.sh"
-fi
-echo
-read -rp "device profile or adb serial: " DEV_NAME || DEV_NAME=""
-DEV_SERIAL="$(device_serial "$DEV_NAME")" \
-  || { echo "not a known profile, and not an attached serial: ${DEV_NAME:-<blank>}" >&2; exit 1; }
-PIN="$(device_pin "$DEV_NAME")"
-export DEV_SERIAL DEV_NAME PIN
+# --- 4) the device picked above has to exist for cases 1–7 --------------------
+# No PIN is read from anywhere. device-ready.sh asks for one if the screen is locked when
+# the scenario starts, and common.sh's unlock() asks again if a reboot brings the keyguard
+# back — both in this process only, never written to disk.
+[ -n "$DEV_SERIAL" ] || {
+  echo "!! $(basename "$TARGET") needs a device attached; none is." >&2
+  exit 1
+}
+export DEV_SERIAL DEV_NAME
 source "$HERE/lib/common.sh"
 source "$HERE/lib/device-ready.sh"
 
@@ -193,7 +168,7 @@ while [ -z "$TARGET_PREFIX" ]; do
   [ -n "$TARGET_PREFIX" ] || echo "  a package prefix is required — it cannot be blank." >&2
 done
 export TARGET_PREFIX
-echo "== Installed target apps on $DEV_NAME ($TARGET_PREFIX*) =="
+echo "== Installed target apps on $DEV_SERIAL ($TARGET_PREFIX*) =="
 PACKAGES=()
 package_count=0
 # -3 lists third-party packages only, keeping the system apps out of the menu.
@@ -211,7 +186,7 @@ if package_list="$(adbx shell pm list packages -3 --user current)"; then
   # device state and then have nothing to launch. Stop here instead of asking.
   if [ "$package_count" -eq 0 ]; then
     echo >&2
-    echo "!! No third-party package matches '$TARGET_PREFIX*' on $DEV_NAME." >&2
+    echo "!! No third-party package matches '$TARGET_PREFIX*' on $DEV_SERIAL." >&2
     echo "   Check the prefix, or install the app under test on the device first." >&2
     exit 1
   fi
@@ -250,7 +225,7 @@ fi
 # --- 6) run -------------------------------------------------------------------
 ensure_device_unlocked || exit 1
 echo
-echo ">> running $(basename "$TARGET")  on  $DEV_NAME ($DEV_SERIAL)  target=${TARGET_PKG:-none}"
+echo ">> running $(basename "$TARGET")  on  $DEV_SERIAL  target=${TARGET_PKG:-none}"
 echo
 # Each case opens TARGET_PKG itself as its final step (after going home).
 bash "$TARGET"

@@ -51,30 +51,18 @@ cases 5–8 do not.
 
 ## Setup
 
-No device **names**, serials or PINs are stored in this repo — `devices.sh` ships three
-placeholder profiles (`device1 device2 device3`) and nothing else. Often you need no setup
-at all:
+None. The device is whatever `adb` reports — one attached phone is selected silently, and
+with several the runner lists them and asks which. No serials, names or PINs are stored
+anywhere, so there is nothing to configure and nothing to keep out of this repo.
 
-- **one phone attached** — any profile name resolves to it
-- **several phones** — type the adb serial straight from the "Connected (adb)" list the
-  runner prints immediately above the prompt
+A locked device is asked for its PIN when the scenario starts, and asked again if the
+reboot in case 2 or 3 brings the keyguard back. It lives in that process only and is
+never written to disk.
 
-Configure profiles only to give your phones names you recognise, or for unattended runs:
-
-```bash
-cp lib/devices.local.sh.example lib/devices.local.sh   # git-ignored
-# then, in that file:
-#   DEVICE_NAMES="pixel8 galaxyA54"        replaces the placeholder list
-#   BST_SERIAL_PIXEL8="abc12345"           suffix = profile name, uppercased
-```
-
-`lib/devices.local.sh` is sourced after the environment, so anything it defines **wins
-over** `DEVICE_NAMES` / `BST_SERIAL_<PROFILE>` / `BST_PIN_<PROFILE>` from the shell.
-Comment the entry out of the file to override it per run.
-
-A locked device is asked for its PIN at run time (digits, never written to disk). Set
-`BST_PIN_<PROFILE>` only if you want unattended runs — note that an exported PIN is
-inherited by every child process the run spawns, `adb` and `frida` included.
+The platform is derived rather than asked: `adb` only ever sees Android, so an attached
+device settles it. iOS is looked for only when no Android device is found — an iPhone
+paired to Xcode must not interrupt an Android run — and reports that no iOS scenarios
+exist yet.
 
 ## Usage
 
@@ -83,12 +71,11 @@ inherited by every child process the run spawns, `adb` and `frida` included.
 ```
 
 It opens with the project header, a preflight report and the recommended folder layout,
-then asks in order: **platform** (iOS is listed but not implemented — choosing it says so
-and continues with Android), **scenario**, **device** (a profile name or a raw adb serial),
-and the **target app**.
+then detects the **device** and the platform it implies, and asks for a **scenario** and
+the **target app**.
 
-Scenario comes before the device deliberately: case 8 installs a local APK onto an
-emulator and needs no phone attached, so it skips the device prompt entirely.
+Case 8 still works with no phone attached at all: its manual mode installs a local APK
+onto an emulator, so the scenario is chosen before the device becomes a requirement.
 
 Useful environment variables:
 
@@ -100,7 +87,6 @@ Useful environment variables:
 | `MODE` | `spawn` (default) or `attach` for case 4 |
 | `TARGET_PREFIX` | **required** package namespace for the app list — asked until given, so no client prefix lives in the repo. The run stops if nothing matches it |
 | `MOD_ZNEXT` / `MOD_LSPOSED` | the module titles as the Modules screen shows them, for cases 1–3 |
-| `DEVICE_NAMES` | profile names to offer; normally set in `lib/devices.local.sh` |
 | `SKIP_PREFLIGHT` | skip the dependency checks |
 
 Retrieved and patched APKs land in `extracted/` (or `$EXTRACTED_DIR`).
@@ -112,7 +98,7 @@ run-scenarios.sh    intro + preflight, then platform / scenario / device / targe
 cases/              one script per scenario
 lib/                base.sh (paths, menu + number parsing — sourced first by everything),
                     common.sh (UI layer, Magisk state engine), mtmanager.sh, preflight.sh,
-                    devices.sh (profile registry), device-ready.sh (keyguard)
+                    devices.sh (device + platform detection), device-ready.sh (keyguard)
 lib/py/             uifind.py (element lookup), u2driver.py (persistent uiautomator2 agent),
                     emulator-case.py (case 8), app-info.py
 make-bundle.sh      packs everything into a single self-extracting bst-tools.sh

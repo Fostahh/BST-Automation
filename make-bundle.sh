@@ -18,9 +18,8 @@ STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/Automation"
 cp "$HERE/run-scenarios.sh" "$STAGE/Automation/"
 cp -R "$HERE/lib" "$HERE/cases" "$STAGE/Automation/"
-# never ship local artefacts, backups, or machine-local config (serials/PINs)
+# never ship local artefacts or backups (there is no machine-local config any more)
 rm -rf "$STAGE/Automation/extracted" "$STAGE/Automation/lib/py/__pycache__"
-rm -f  "$STAGE/Automation/lib/devices.local.sh"
 find "$STAGE/Automation" \( -name '*.bak' -o -name '.DS_Store' -o -name '*.apk' -o -name '*.apks' \) -delete
 
 {
@@ -35,7 +34,7 @@ find "$STAGE/Automation" \( -name '*.bak' -o -name '.DS_Store' -o -name '*.apk' 
 # Needs on this Mac: adb, python3 (always); frida (case 4); android-unpinner
 # (case 5, also supplies aapt2); Android emulator + an AVD (case 8).
 # On every test device: MT Manager installed AND logged in.
-# Device serials: set BST_SERIAL_<PROFILE> (see `adb devices`), or just attach one device.
+# Attach the phone and run it: the device is taken from `adb devices`, nothing to configure.
 # Case 4 needs your own .js frida hooks (none are bundled): keep a folder of them next
 # to this file and it is found automatically, or set HOOK_DIR=/path/to/your/hooks.
 # First run offers to install uiautomator2 into ~/.bst-tools/venv (makes UI steps ~8x faster).

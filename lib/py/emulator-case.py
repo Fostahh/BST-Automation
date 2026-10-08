@@ -171,19 +171,32 @@ def wait_for_emulator(serial, name, process, log, timeout):
     raise RuntimeError(f"Emulator boot timed out after {timeout}s. Log: {log or 'existing emulator'}")
 
 
+def attached_phones():
+    """Physical Android serials in `device` state. The emulator this case starts shows up
+    in `adb devices` too, so exclude anything named emulator-*."""
+    found = []
+    for line in run(["adb", "devices"]).splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == "device" and not fields[0].startswith("emulator-"):
+            found.append(fields[0])
+    return found
+
+
 def auto_source(directory):
-    registry = LIB / "devices.sh"
-    names = run(["bash", "-c", 'source "$1"; printf "%s" "$DEVICE_NAMES"', "profiles", registry]).split()
-    name = os.environ.get("SOURCE_DEVICE", "")
-    if name in ("", "-"):
-        name = choose(names, "Source phone: ")
-    if name not in names:
-        raise RuntimeError(f"Unknown source device profile: {name}")
-    serial = run(["bash", "-c", 'source "$1"; device_serial "$2"', "profile", registry, name])
+    # The runner picks the device and exports DEV_SERIAL; this used to source devices.sh
+    # through two separate `bash -c` calls to resolve a profile name that no longer exists.
+    serial = os.environ.get("DEV_SERIAL", "")
     if serial.startswith("emulator-"):
-        raise RuntimeError("Automatic source must be a physical device profile.")
+        raise RuntimeError("Automatic source needs a physical phone, not an emulator.")
+    if not serial:
+        phones = attached_phones()
+        if not phones:
+            raise RuntimeError("Automatic source needs a phone attached; none is. "
+                               "Use manual mode with a local APK instead.")
+        serial = phones[0] if len(phones) == 1 else choose(phones, "Source phone: ")
     if adb(serial, "get-state") != "device":
-        raise RuntimeError(f"Source phone {name} is not connected.")
+        raise RuntimeError(f"Source phone {serial} is not connected.")
+    name = serial
     package = os.environ.get("TARGET_PKG", "")
     if package in ("", "-"):
         # -3 lists third-party packages only; TARGET_PREFIX narrows that to one namespace.
@@ -213,7 +226,7 @@ def auto_source(directory):
     if not adb(serial, "shell", "pm", "path", "--user", "current", package).startswith("package:"):
         raise RuntimeError(f"{package} is not installed on {name}.")
     subprocess.run([sys.executable, str(PYLIB / "app-info.py"), serial, package], check=True)
-    subprocess.run(["bash", str(LIB / "emulator-extract.sh"), name, package, str(directory)],
+    subprocess.run(["bash", str(LIB / "emulator-extract.sh"), serial, package, str(directory)],
                    check=True, timeout=600)
     return Path((directory / "source-path.txt").read_text().strip()), package
 

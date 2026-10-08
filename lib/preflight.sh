@@ -38,24 +38,16 @@ _pf_tool() {
   return 1
 }
 
-# Warn about device setup here, before a scenario is chosen and time is spent, rather
-# than only at the device prompt. Silent when a single attached device already covers it.
+# Report what is on the cable. There is nothing to configure, so this is informational
+# except when there is no device at all, which rules out every scenario but 8.
 _pf_devices() {
-  local total=0 ok=0 name attached
-  for name in $DEVICE_NAMES; do
-    total=$((total + 1))
-    device_serial "$name" >/dev/null 2>&1 && ok=$((ok + 1))
-  done
-  attached="$(adb devices 2>/dev/null | tr -d '\r' | awk '$2=="device"{c++} END{print c+0}')"
-  if [ "$ok" -gt 0 ]; then
-    _pf_row "device profiles" "$ok/$total resolve · $attached attached"
-    return 0
-  fi
-  _pf_row "device profiles" "none resolve · $attached attached"
-  echo "    name your phones and their serials in lib/devices.local.sh:" >&2
-  echo "      cp lib/devices.local.sh.example lib/devices.local.sh" >&2
-  echo "    or attach one device and any profile name resolves to it; the device prompt" >&2
-  echo "    also accepts a raw adb serial." >&2
+  local n
+  n="$(android_serials | grep -c . || true)"
+  case "$n" in
+    0) _pf_row "device" "none attached — only scenario 8 (manual APK) can run" ;;
+    1) _pf_row "device" "1 attached" ;;
+    *) _pf_row "device" "$n attached — the runner will ask which" ;;
+  esac
 }
 
 # The same failure seen from the other side: cases 4 and 5 offer to `source` the venv's
