@@ -8,6 +8,7 @@
 #        UI_EXEC=1|0    1 = start the server by hand via MT Manager's Script executor
 #                       0 = start it headless over adb (setsid)
 #        OPEN_MT=1|0    launch MT Manager as a visual aid in the headless path
+#        FORCE_SERVER=1 stop any running server and launch our own (default: reuse it)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../lib/common.sh"                      # adbx(), inp(), launch(), focus_now(), swipr(), detect_size()
@@ -103,7 +104,7 @@ ui_tap_scroll() {                                    # ui_tap_scroll <tries> [--
   local i xy
   for ((i=1;i<=tries;i++)); do
     ui_dump; xy="$(ui_find "$@")" && { inp tap $xy; return 0; }
-    swipr "$sx" 0.80 "$sx" 0.33 250; sleep 0.6        # scroll the list down one page-ish
+    swipr "$sx" 0.80 "$sx" 0.33 250; nap 0.6        # scroll the list down one page-ish
   done
   return 1
 }
@@ -156,7 +157,7 @@ open_mt_manager() {
     return 1
   fi
   inp keyevent 224 >/dev/null 2>&1 || true           # WAKEUP: turn the screen on
-  sleep 0.5
+  nap 0.5
   launch "$MT_PKG"                                    # bring the file manager to the foreground
   local n=0
   until focus_now | grep -q "$MT_PKG"; do
@@ -164,22 +165,22 @@ open_mt_manager() {
     [ "$n" -gt 16 ] && { echo "   WARN: MT Manager may not be foreground (check the device)" >&2; break; }
   done
   echo "   MT Manager is up on the device."
-  sleep 1
+  nap 1
 }
 
 mt_jump_to() {                                       # navigate via the "Jump to path" dialog
   local path="$1" dels
   dels="$(printf '67 %.0s' $(seq 1 80))"             # KEYCODE_DEL x80 (clear the field)
   ui_tap clickable=true cls=TextView textprefix=/ maxy=300 || { echo "   path bar not found" >&2; return 1; }
-  sleep 1
+  nap 1
   ui_tap cls=EditText || { echo "   'Jump to path' input not found" >&2; return 1; }
-  sleep 0.4
+  nap 0.4
   inp keyevent 123                                   # MOVE_END
   inp keyevent $dels                                 # clear whatever was pre-filled
   inp text "$path"
-  sleep 0.3
+  nap 0.3
   { ui_tap textequals=OK res=button1 || ui_tap textequals=OK; } || { echo "   OK button not found" >&2; return 1; }
-  sleep 1.2
+  nap 1.2
 }
 
 # --- 3+4) frida version, matched server, launch ------------------------------
@@ -203,11 +204,12 @@ port_pid() {     # PID holding local TCP port $1 (empty if nothing/unknown)
 stop_frida() {   # clear every frida-server on the device, whatever it is called
   adbx shell "su -c 'pkill -9 -f \"[f]rida-server\"'" >/dev/null 2>&1 || true
   local p
-  p="$(server_pid frida-server)"
-  [ -n "$p" ] && adbx shell "su -c 'kill -9 $p'" >/dev/null 2>&1 || true
-  p="$(port_pid "$FRIDA_PORT")"
-  [ -n "$p" ] && adbx shell "su -c 'kill -9 $p'" >/dev/null 2>&1 || true
-  sleep 1
+  for p in "$(server_pid frida-server)" "$(port_pid "$FRIDA_PORT")"; do
+    # Only ever interpolate something that is unambiguously a pid.
+    case "$p" in ''|*[!0-9]*) continue;; esac
+    su_sh "kill -9 $p" >/dev/null 2>&1 || true
+  done
+  nap 1
 }
 
 terminal_up() {  # true once the executor terminal (or Termux) is on screen
@@ -230,10 +232,10 @@ ui_launch_server() {   # drive MT Manager: tmp folder -> server -> Script execut
   local sx; sx="$(pane_scroll_x)"                     # scroll the pane that actually holds the folder
   echo "   scrolling (pane x=$sx) to $SERVER and tapping it ..."
   ui_tap_scroll 14 --sx "$sx" textequals="$SERVER" || { echo "   could not find $SERVER in the list" >&2; return 1; }
-  sleep 1
+  nap 1
   echo "   choosing 'Script executor' ..."
   ui_tap_scroll 6 textequals="Script executor" || { echo "   'Script executor' option not found" >&2; return 1; }
-  sleep 1.2
+  nap 1.2
   echo "   tapping EXECUTE (runs with root) ..."
   ui_tap textequals=EXECUTE || { echo "   EXECUTE button not found" >&2; return 1; }
   # wait for the terminal console to appear
@@ -259,33 +261,64 @@ bring_up_server() {
     *)             arch="$abi";;
   esac
 
-  # pick the server whose filename carries the exact macOS version (prefer the arch match)
-  listing=$(adbx shell "su -c 'ls $SERVER_DIR'" 2>/dev/null | tr -d '\r' | grep -i 'frida-server')
-  SERVER=$(printf '%s\n' "$listing" | grep -F "$FRIDA_VER" | grep -i "$arch" | head -n1)
-  [ -z "$SERVER" ] && SERVER=$(printf '%s\n' "$listing" | grep -F "$FRIDA_VER" | head -n1)
+  # Pick the server whose filename carries the exact macOS version (prefer the arch match).
+  # Guard every one of these: grep exits 1 when nothing matches, `set -o pipefail` turns
+  # that into a failed assignment, and `set -e` then kills the scenario with NO message —
+  # the symptom is the script stopping right after step 3 on a device that has no server.
+  # List WITHOUT su: /data/local/tmp belongs to the shell user, and on a KernelSU device
+  # the su domain (u:r:ksu:s0) is denied read on shell_data_file under enforcing SELinux —
+  # `su -c ls` answers "Permission denied" while the plain shell listing works fine.
+  # Only fall back to su for a custom SERVER_DIR that the shell user cannot read.
+  listing=$(adbx shell "ls $(shq "$SERVER_DIR")" 2>/dev/null | tr -d '\r' | grep -i 'frida-server' || true)
+  [ -n "$listing" ] || listing=$(su_sh "ls $(shq "$SERVER_DIR")" 2>/dev/null | tr -d '\r' | grep -i 'frida-server' || true)
+  SERVER=$(printf '%s\n' "$listing" | grep -F "$FRIDA_VER" | grep -i "$arch" | head -n1 || true)
+  [ -n "$SERVER" ] || SERVER=$(printf '%s\n' "$listing" | grep -F "$FRIDA_VER" | head -n1 || true)
   if [ -z "$SERVER" ]; then
-    echo "!! no frida-server matching $FRIDA_VER found in $SERVER_DIR on the device." >&2
-    echo "   available there:" >&2
-    printf '%s\n' "$listing" | sed 's/^/     /' >&2
+    echo "!! no frida-server matching $FRIDA_VER ($arch) in $SERVER_DIR on $DEV_NAME." >&2
+    if ! adbx shell 'su -c id' >/dev/null 2>&1; then
+      echo "   this device has no working su — case 4 needs root (Magisk)." >&2
+    elif [ -z "$listing" ]; then
+      local want="frida-server-$FRIDA_VER-android-$arch"
+      echo "   $SERVER_DIR holds no frida-server* file at all. Push the matching one:" >&2
+      echo "     # from https://github.com/frida/frida/releases/tag/$FRIDA_VER  ($want.xz)" >&2
+      echo "     adb -s $DEV_SERIAL push $want $SERVER_DIR/" >&2
+      echo "     adb -s $DEV_SERIAL shell \"su -c 'chmod 755 $SERVER_DIR/$want'\"" >&2
+    else
+      echo "   present there, but none carry $FRIDA_VER:" >&2
+      printf '%s\n' "$listing" | sed 's/^/     /' >&2
+      echo "   either push a $FRIDA_VER server, or match the Mac to one of the above" >&2
+      echo "   (pip install frida-tools==<version matching a server above>)." >&2
+    fi
     exit 1
   fi
   echo "4) matched device server: $SERVER  (abi=$abi)"
 
   if [ "${UI_EXEC:-1}" = "1" ]; then
     detect_size                                      # swipr/ratio taps need the screen size
-    # stop any stale instance so the hand-launched one binds cleanly (no "already in use")
+    # A server may already be running: from an earlier run, a boot script, or a root
+    # manager that keeps one up. If the host can talk to it, REUSE it. Do not try to
+    # replace it: on a KernelSU device the su domain is blind to the process table
+    # (ps/lsof/proc all come back empty), so stop_frida cannot kill what it cannot see
+    # and the hand-launch then dies with "Error binding to address ... already in use".
+    # FORCE_SERVER=1 insists on stopping it and launching our own instead.
+    if [ "${FORCE_SERVER:-0}" != 1 ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+      echo "   a frida-server is already running on $DEV_NAME and answering — reusing it."
+      echo ">> frida-server ready (reused)."
+      return 0
+    fi
     local stale
     stale="$(server_pid "$SERVER")"
     [ -n "$stale" ] || stale="$(server_pid frida-server)"
     [ -n "$stale" ] || stale="$(port_pid "$FRIDA_PORT")"
-    if [ -n "$stale" ] || frida-ps -U >/dev/null 2>&1; then
+    if [ -n "$stale" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
       echo "   stopping an already-running frida-server so the UI launch binds cleanly ..."
       stop_frida
-      if [ -n "$(port_pid "$FRIDA_PORT")" ]; then
-        echo "   !! port $FRIDA_PORT is STILL held. It is most likely MT Manager's own"   >&2
-        echo "      terminal from an earlier run, or a frida Magisk module. Try:"        >&2
-        echo "        adb -s $DEV_SERIAL shell \"su -c 'am force-stop $MT_PKG'\""        >&2
-        echo "        adb -s $DEV_SERIAL reboot"                                         >&2
+      if [ -n "$(port_pid "$FRIDA_PORT")" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+        echo "   !! port $FRIDA_PORT is STILL held and could not be freed." >&2
+        echo "      On KernelSU the process is invisible to su, so it cannot be killed." >&2
+        echo "      Either drop FORCE_SERVER to reuse the running server, or:" >&2
+        echo "        adb -s $DEV_SERIAL reboot" >&2
+        exit 1
       fi
     fi
     ui_launch_server || { echo "!! could not launch frida-server through MT Manager." >&2; exit 1; }
@@ -301,13 +334,15 @@ bring_up_server() {
       pid="$(server_pid "$SERVER")"
       [ -n "$pid" ] && break
     done
-    if [ -n "$pid" ] && frida-ps -U >/dev/null 2>&1; then
-      echo ">> no error. CLI check: targeted server '$SERVER' is RUNNING (pid $pid), reachable via frida-ps -U."
+    if [ -n "$pid" ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+      echo ">> no error. CLI check: targeted server '$SERVER' is RUNNING (pid $pid), reachable via frida-ps."
     else
       echo "!! frida-server errored — it is not running after EXECUTE." >&2
       echo "   what happened (captured by running it once on the device):" >&2
       local diag
-      diag="$(adbx shell "su -c 'timeout 3 $SERVER_DIR/$SERVER 2>&1 | head -5'" 2>/dev/null | tr -d '\r' || true)"
+      # $SERVER comes from a device directory listing, so it must be quoted: it reaches
+      # a root shell, where a crafted filename would otherwise run as a command.
+      diag="$(su_sh "timeout 3 $(shq "$SERVER_DIR/$SERVER") 2>&1 | head -5" 2>/dev/null | tr -d '\r' || true)"
       [ -n "$diag" ] && printf '%s\n' "$diag" | sed 's/^/     /' >&2
       local scr; scr="$(terminal_error)"; [ -n "$scr" ] && printf '     %s\n' "$scr" >&2
       case "$diag$scr" in
@@ -324,13 +359,13 @@ bring_up_server() {
   else
     # headless fallback: optional visual aid + background start over adb
     [ "${OPEN_MT:-1}" = "1" ] && open_mt_manager || true
-    if [ -n "$(server_pid "$SERVER")" ]; then
+    if frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || [ -n "$(server_pid "$SERVER")" ]; then
       echo "   a frida-server is already running — reusing it."
     else
-      adbx shell "su -c 'chmod 755 $SERVER_DIR/$SERVER; setsid $SERVER_DIR/$SERVER >/dev/null 2>&1 &'" || true
-      sleep 2
+      su_sh "chmod 755 $(shq "$SERVER_DIR/$SERVER"); setsid $(shq "$SERVER_DIR/$SERVER") >/dev/null 2>&1 &" || true
+      nap 2
     fi
-    frida-ps -U >/dev/null 2>&1 || { echo "!! frida-server did not come up (frida-ps -U failed)." >&2; exit 1; }
+    frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || { echo "!! frida-server did not come up (frida-ps failed)." >&2; exit 1; }
     echo ">> frida-server ($FRIDA_VER) runs."
   fi
 }
@@ -360,8 +395,8 @@ run_hook() {
   # signal until frida has exited rather than taking the whole scenario down with it.
   trap ':' INT
   case "${MODE:-spawn}" in
-    attach) frida -U -N "$PKG" -l "$HOOK" || true;;   # attach to a running process by identifier
-    *)      frida -U -f "$PKG" -l "$HOOK" || true;;    # spawn so the hook loads before app startup checks
+    attach) frida -D "$DEV_SERIAL" -N "$PKG" -l "$HOOK" || true;;   # attach to a running process by identifier
+    *)      frida -D "$DEV_SERIAL" -f "$PKG" -l "$HOOK" || true;;    # spawn so the hook loads before app startup checks
   esac
   trap - INT
 }
@@ -401,7 +436,7 @@ rm -f "$UI_XML"
 while :; do
   run_hook
   hook_again || break
-  if ! frida-ps -U >/dev/null 2>&1; then
+  if ! frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
     echo "   frida-server is no longer reachable — re-run Case 4 to bring it back up." >&2
     break
   fi

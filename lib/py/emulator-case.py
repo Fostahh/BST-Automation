@@ -15,6 +15,20 @@ PYLIB = Path(__file__).resolve().parent        # Automation/lib/py
 LIB = PYLIB.parent                            # Automation/lib (the .sh helpers)
 
 
+def _nap(seconds):
+    """Mirror common.sh nap(): scale by DELAY_SCALE, floor at NAP_MIN, cap only if
+    NAP_MAX is set (it is unset by default — a capped settle lets the next UI read
+    land on the previous screen)."""
+    try:
+        scale = float(os.environ.get("DELAY_SCALE", "1") or 1)
+        lo = float(os.environ.get("NAP_MIN", "0.3") or 0.3)
+        hi = float(os.environ.get("NAP_MAX", "") or 0)
+    except ValueError:
+        scale, lo, hi = 1.0, 0.3, 0.0
+    value = max(seconds * scale, lo)
+    return min(value, hi) if hi > 0 else value
+
+
 def run(args, timeout=30):
     result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout)
     if result.returncode:
@@ -150,7 +164,7 @@ def wait_for_emulator(serial, name, process, log, timeout):
                     return
         except (RuntimeError, subprocess.TimeoutExpired):
             pass
-        time.sleep(2)
+        time.sleep(_nap(2))
     raise RuntimeError(f"Emulator boot timed out after {timeout}s. Log: {log or 'existing emulator'}")
 
 
@@ -172,7 +186,12 @@ def auto_source(directory):
         # -3 lists third-party packages only; TARGET_PREFIX narrows that to one namespace.
         # An unscoped list can enumerate restricted work/secure profiles (e.g. user 150),
         # so match the foreground Android user whose MT Manager UI performs extraction.
-        prefix = "package:" + os.environ.get("TARGET_PREFIX", "")
+        # Asked at run time so no client namespace has to live in the repo; an exported
+        # TARGET_PREFIX (even empty) skips the question.
+        prefix = os.environ.get("TARGET_PREFIX")
+        if prefix is None:
+            prefix = input("Target package prefix (blank = all third-party apps): ").strip().rstrip("*")
+        prefix = "package:" + prefix
         packages = sorted({line[8:] for line in adb(serial, "shell", "pm", "list", "packages", "-3", "--user", "current").splitlines()
                            if line.startswith(prefix)})
         for index, item in enumerate(packages, 1):

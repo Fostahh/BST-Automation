@@ -33,7 +33,7 @@ gate() {
   case "$ans" in n|N) echo "   stopped by user."; exit 0;; esac
 }
 
-open_app() { echo "   opening $1 ..."; wake; launch "$1"; sleep 2; }
+open_app() { echo "   opening $1 ..."; wake; launch "$1"; nap 2; }
 
 # --- flow ---------------------------------------------------------------------
 # 1) target package to clone

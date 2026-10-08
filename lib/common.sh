@@ -14,12 +14,17 @@
 #                gets a tap/dump with no settle at all. Default 1.
 #   NAP_MIN      the floor every settle is clamped to. Default 0.3s.
 #   NAP_SHORT NAP_MED NAP_NAV NAP_SCROLL NAP_LSPOSED  the per-action settle lengths.
+#   NAP_MAX      optional cap per settle. Empty (default) = no cap. Do NOT set it for
+#                cases 1-3: a too-short settle makes the next dump read the old screen.
 #   OPEN_SETTLE  seconds of boot_id stability to watch for when opening Magisk (the
 #                Zygisk second-boot guard). Lower = faster but less safe. Default 6, min 2.
 #   SETTLE_NEED / SETTLE_MAX  post-reboot stability required / overall cap. Default 20 (min 6) / 200.
 #   BOOT_POLL    poll interval for boot/stability loops. Default 2 (min 1).
 #   TAP_RETRIES  ui_tap_when dump+retry attempts. Default 10 (min 3).
 #   MAGISK_FG_TRIES  wait_magisk_fg attempts (x0.5s). Default 40 (min 10).
+#   MAGISK_WATCH_ALWAYS  1 = full boot_id settle watch on every Magisk open (~15s each).
+#                Default 0: armed only right after a reboot, which is the only time the
+#                Zygisk post-enable restart can happen.
 
 : "${DEV_SERIAL:?DEV_SERIAL not set — launch scenarios via run-scenarios.sh}"
 
@@ -32,17 +37,20 @@ MOD_ZNEXT="${MOD_ZNEXT:-Zygisk Next}"
 # --- tunable delays (seconds) -------------------------------------------------
 DELAY_SCALE=${DELAY_SCALE:-1}            # global multiplier for every nap
 NAP_MIN=${NAP_MIN:-0.3}                  # floor: no settle is ever shorter than this
+NAP_MAX=${NAP_MAX:-}                     # OPTIONAL cap per settle (empty = none). See nap().
 NAP_SHORT=${NAP_SHORT:-0.8}             # after a tap / minor settle
 NAP_MED=${NAP_MED:-1.2}                 # after typing / a toggle / a dialog
 NAP_NAV=${NAP_NAV:-1.5}                 # after a screen or navigation change
 NAP_SCROLL=${NAP_SCROLL:-0.6}           # after a scroll swipe
 NAP_LSPOSED=${NAP_LSPOSED:-3}           # wait for the LSPosed manager to open
-OPEN_SETTLE=${OPEN_SETTLE:-6}           # open_magisk_home: boot_id stability watch
+OPEN_SETTLE=${OPEN_SETTLE:-3}           # open_magisk_home: boot_id stability watch
 SETTLE_NEED=${SETTLE_NEED:-20}          # reboot_wait: stable seconds required
 SETTLE_MAX=${SETTLE_MAX:-200}           # wait_until_stable: overall cap
 BOOT_POLL=${BOOT_POLL:-2}               # boot/stability poll interval
 TAP_RETRIES=${TAP_RETRIES:-10}          # ui_tap_when attempts
 MAGISK_FG_TRIES=${MAGISK_FG_TRIES:-40}  # wait_magisk_fg attempts (x0.5s)
+MAGISK_WATCH_ALWAYS=${MAGISK_WATCH_ALWAYS:-0}   # 1 = run the full settle watch on EVERY Magisk open
+MAGISK_WATCH_ARMED=0                            # runtime: set by reboot_wait, cleared after a clean open
 # clamp the integer knobs to safe minimums so a too-low value can't break the flow
 [ "$OPEN_SETTLE"     -lt 2  ] 2>/dev/null && OPEN_SETTLE=2
 [ "$SETTLE_NEED"     -lt 6  ] 2>/dev/null && SETTLE_NEED=6
@@ -50,9 +58,21 @@ MAGISK_FG_TRIES=${MAGISK_FG_TRIES:-40}  # wait_magisk_fg attempts (x0.5s)
 [ "$TAP_RETRIES"     -lt 3  ] 2>/dev/null && TAP_RETRIES=3
 [ "$MAGISK_FG_TRIES" -lt 10 ] 2>/dev/null && MAGISK_FG_TRIES=10
 
-# nap <seconds> : sleep max(NAP_MIN, <seconds>*DELAY_SCALE) — never below the floor.
+# nap <seconds> : the standard UI settle — max(NAP_MIN, <seconds>*DELAY_SCALE).
+# NAP_MAX can cap it, but it is OFF by default and should stay off for the Magisk
+# cases: a settle that is too short makes the NEXT ui_dump snapshot the PREVIOUS
+# screen, and the state readers (ui_checked/read_modules) then decide on stale data.
+# Retrying a tap cannot detect that, so speed here comes from DELAY_SCALE, knowingly.
 nap() {
-  local s; s=$(awk "BEGIN{v=$1*$DELAY_SCALE; m=$NAP_MIN; if(v<m)v=m; printf \"%.3f\", v}")
+  local s
+  s=$(awk "BEGIN{v=$1*$DELAY_SCALE; lo=$NAP_MIN; if(v<lo)v=lo
+                 hi=\"$NAP_MAX\"+0; if(hi>0 && v>hi)v=hi; printf \"%.3f\", v}")
+  sleep "$s"
+}
+# nap_long <seconds> : for waits that are NOT a UI settle and must not be capped —
+# a reboot handshake, keyguard coming back, another app's manager starting up.
+nap_long() {
+  local s; s=$(awk "BEGIN{v=$1*$DELAY_SCALE; lo=$NAP_MIN; if(v<lo)v=lo; printf \"%.3f\", v}")
   sleep "$s"
 }
 
@@ -67,6 +87,18 @@ detect_size() {
 }
 px() { awk "BEGIN{printf \"%d\", $1*$W}"; }
 py() { awk "BEGIN{printf \"%d\", $1*$H}"; }
+
+# Quoting for the device. `adb shell` does NOT pass argv through: it joins everything
+# into one string that the device's shell re-parses, so any path we interpolate must be
+# quoted for that shell. shq() single-quotes safely (embedded ' becomes '\''), and
+# su_sh() re-quotes once more for the second parse inside `su -c '...'`.
+shq() {   # single-quote "$1" for the device shell: an embedded ' becomes '\''
+  # Parameter expansion, not sed: the sed form needs backslashes that are easy to lose
+  # when this file is generated or edited, and losing them silently re-opens injection.
+  local s="$1" q="'"
+  printf "'%s'" "${s//$q/$q\\$q$q}"
+}
+su_sh() { adbx shell "su -c $(shq "$1")"; }
 
 # Input: MIUI blocks injection for the shell user (INJECT_EVENTS), so on a rooted device
 # route it through su; on a non-rooted one (device2) plain `input` works. One probe, one
@@ -141,6 +173,8 @@ ui_dump() {                      # snapshot the current screen into $UI_XML (ove
 trap 'u2_stop; rm -f "$UI_XML"' EXIT      # stop the driver + remove the temp on exit
 ui_find() { python3 "$LIB/py/uifind.py" "$UI_XML" "$@"; }            # echoes per --print; rc1 if none
 ui_checked() { ui_find --print checked "$@" 2>/dev/null || true; } # "true"/"false"/"" (not found)
+# ui_tap taps against the caller's existing snapshot and never re-dumps: callers read
+# state from that same snapshot, so silently replacing it underneath them is unsafe.
 ui_tap() { local xy; xy="$(ui_find "$@" 2>/dev/null || true)"; [ -n "$xy" ] || return 1; inp tap $xy; }
 # ui_tap_when: re-dump until the element appears (slow screens, esp. just after boot), then tap it.
 ui_tap_when() {
@@ -193,16 +227,17 @@ wait_until_stable() {
 
 reboot_wait() {
   echo "  rebooting $DEV_NAME ..."
-  adbx reboot; sleep 5; adbx wait-for-device
+  adbx reboot; nap_long 5; adbx wait-for-device
   local n=0
   until device_up; do
     sleep "${BOOT_POLL:-2}"; n=$((n+1)); [ "$n" -gt 180 ] && { echo "  boot timeout" >&2; return 1; }
   done
-  sleep 3; unlock
+  nap_long 3; unlock
   # Enabling Zygisk makes the system auto-restart a few seconds into the first boot;
   # wait that second reboot out, then unlock again if it actually happened.
   wait_until_stable "$SETTLE_NEED" "$SETTLE_MAX"
-  if [ "$SECOND_REBOOT" = 1 ]; then sleep 3; unlock; fi
+  if [ "$SECOND_REBOOT" = 1 ]; then nap_long 3; unlock; fi
+  MAGISK_WATCH_ARMED=1        # the next Magisk open is the one that needs the full watch
   echo "  boot complete (stable)."
 }
 do_reboot() {   # honour REBOOT=1 (unattended) or prompt
@@ -222,20 +257,36 @@ wait_magisk_fg() {   # wait until Magisk is focused before tapping (esp. after a
     sleep 0.5; n=$((n+1)); [ "$n" -gt "$MAGISK_FG_TRIES" ] && return 1
   done
 }
+# open_magisk_home's two settle watches guard exactly ONE event: enabling Zygisk makes
+# the system restart a few seconds into the first boot. Each watch needs OPEN_SETTLE
+# seconds of boot_id stability at BOOT_POLL granularity, so the pair costs ~15s on every
+# Magisk open — and apply_state opens Magisk 2-3 times. Arm them only while that restart
+# is actually possible (right after a reboot). Outside that window a refresh is still
+# DETECTED by the boot_id comparison below and still triggers a reopen; we just don't
+# pay 15s waiting for one that cannot come. MAGISK_WATCH_ALWAYS=1 restores the old cost.
+magisk_settle_watch() {   # $1 = overall cap
+  if [ "$MAGISK_WATCH_ALWAYS" = 1 ] || [ "$MAGISK_WATCH_ARMED" = 1 ]; then
+    wait_until_stable "$OPEN_SETTLE" "$1"
+  else
+    SECOND_REBOOT=0       # nothing observed, so nothing to report
+  fi
+}
 open_magisk_home() {   # fresh launch -> Home, resilient to the Zygisk post-enable refresh
   local try bid0
   for try in 1 2 3 4 5; do
-    wait_until_stable "$OPEN_SETTLE" 120            # don't launch into a refreshing system
+    magisk_settle_watch 120                         # don't launch into a refreshing system
     bid0="$(boot_id)"
     adbx shell am force-stop com.topjohnwu.magisk >/dev/null 2>&1; nap "$NAP_SHORT"
     launch com.topjohnwu.magisk
     wait_magisk_fg || true
-    wait_until_stable "$OPEN_SETTLE" 90             # the refresh often hits a few seconds AFTER opening
+    magisk_settle_watch 90                          # the refresh often hits a few seconds AFTER opening
     if [ "$SECOND_REBOOT" = 1 ] || [ "$(boot_id)" != "$bid0" ]; then
       echo "  (system refreshed after opening Magisk — reopening)" >&2
-      nap 2; unlock; continue
+      nap_long 2; unlock; continue
     fi
-    case "$(focus_now)" in *com.topjohnwu.magisk*) nap "$NAP_SHORT"; return 0;; esac
+    case "$(focus_now)" in
+      *com.topjohnwu.magisk*) nap "$NAP_SHORT"; MAGISK_WATCH_ARMED=0; return 0;;   # post-reboot window survived
+    esac
     echo "  (Magisk not foreground, retry $try)" >&2; nap 2
   done
   echo "  WARN: Magisk not stably foreground after retries" >&2; nap "$NAP_NAV"
@@ -288,7 +339,7 @@ tap_module() {   # toggle a module's switch by its title ($1)
 lsposed_action() {
   open_magisk_modules
   echo "tapping LSPosed 'Action' ..."
-  ui_tap_when --near-text "$MOD_LSPOSED" res=module_config; nap "$NAP_LSPOSED"
+  ui_tap_when --near-text "$MOD_LSPOSED" res=module_config; nap_long "$NAP_LSPOSED"
 }
 
 # --- set + verify Enforce/DenyList via the UI (one Settings session) ----------

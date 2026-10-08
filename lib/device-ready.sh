@@ -56,8 +56,17 @@ ensure_device_unlocked() (
     return 0
   fi
   if [ -z "${PIN:-}" ]; then
-    echo '!! Device is still locked. Set its PIN in lib/devices.sh or unlock it manually, then rerun.' >&2
-    return 1
+    # No PIN configured: ask once, in this process only — nothing is written to disk.
+    # BST_PIN_<PROFILE> or lib/devices.local.sh can supply it for unattended runs.
+    if [ -t 0 ]; then
+      read -rsp "  PIN for ${DEV_NAME:-$DEV_SERIAL} (digits; not stored): " PIN || PIN=""
+      echo
+    fi
+    case "${PIN:-}" in
+      ''|*[!0-9]*)
+        echo '!! Device is still locked and no numeric PIN was given — unlock it manually, then rerun.' >&2
+        return 1 ;;
+    esac
   fi
 
   # One PIN attempt only; a failed PIN must not repeatedly trigger lockout penalties.

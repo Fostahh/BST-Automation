@@ -43,6 +43,19 @@ automatically into a private venv on first run.
 On every test device: MT Manager installed and logged in. Cases 1–4 need root (Magisk);
 cases 5–8 do not.
 
+## Setup
+
+No device serials or PINs are stored in this repo. Either attach a single device and the
+profiles resolve to it automatically, or configure them per machine:
+
+```bash
+cp lib/devices.local.sh.example lib/devices.local.sh   # git-ignored
+# or, per run:  BST_SERIAL_DEVICE1=abc12345 ./run-scenarios.sh device1 1
+```
+
+A locked device is asked for its PIN at run time (digits, never written to disk). Set
+`BST_PIN_<PROFILE>` only if you want unattended runs.
+
 ## Usage
 
 ```bash
@@ -56,9 +69,10 @@ Useful environment variables:
 | Variable | Effect |
 |----------|--------|
 | `HOOK_DIR` | folder of `.js` frida hooks for case 4 (otherwise auto-detected, then prompted) |
-| `DELAY_SCALE` | UI delay multiplier for cases 1–3 (`0.5` = faster; a floor always applies) |
+| `DELAY_SCALE` | UI speed multiplier for **every** case — asked at run time; `2` = more patient |
+| `NAP_MAX` | optional cap per settle; **unset by default** — capping it makes the Magisk screens get read before they finish changing |
 | `MODE` | `spawn` (default) or `attach` for case 4 |
-| `TARGET_PREFIX` | narrow the interactive app list to one package namespace |
+| `TARGET_PREFIX` | package namespace to narrow the app list to — **asked at run time if unset**, so no client prefix lives in the repo |
 | `SKIP_PREFLIGHT` | skip the dependency checks |
 
 Retrieved and patched APKs land in `extracted/` (or `$EXTRACTED_DIR`).
@@ -77,7 +91,11 @@ make-bundle.sh      packs everything into a single self-extracting bst-tools.sh
 ## Notes
 
 UI steps run through **uiautomator2**, which keeps a persistent agent on the device —
-hierarchy dumps take ~0.23s instead of ~2s per call. Elements are located by `text`,
+hierarchy dumps take ~0.23s instead of ~2s per call. `ui_tap_when` re-dumps and retries
+until an element appears, but the settles themselves still matter: the state readers
+(`ui_checked`, `read_modules`) decide from a snapshot, so a settle that is too short
+makes them read the screen the device has not finished leaving. Speed comes from
+`DELAY_SCALE`, which is a knowing trade, not from shortening settles behind your back. Elements are located by `text`,
 `resource-id` or `content-desc`, never by coordinates, so the same script runs on any
 screen size without per-device tuning.
 

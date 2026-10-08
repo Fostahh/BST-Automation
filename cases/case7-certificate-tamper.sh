@@ -69,7 +69,7 @@ c7_set_scheme() {
   if ! c7_scheme_matches; then
     ui_tap_when --near-text Scheme res=text1 || return 1
     ui_tap_when textequals='V1 + V2 + V3' || return 1
-    sleep 0.5
+    nap 0.5
     ui_dump || return 1
     c7_scheme_matches || { c7_fail 'Signing Scheme did not become V1 + V2 + V3.'; return 1; }
   fi
@@ -79,7 +79,7 @@ c7_set_scheme() {
 c7_close_tip() {
   if ui_find textequals=Tip >/dev/null 2>&1 || ui_find textequals=Tips >/dev/null 2>&1; then
     { ui_tap res=button1 textequals=CLOSE || ui_tap textequals=Close || ui_tap textequals=CLOSE; } || return 1
-    sleep 0.5
+    nap 0.5
     return 2  # dismissed; the polling loop must obtain a fresh snapshot
   fi
 }
@@ -161,7 +161,7 @@ c7_pick_installer() {
     ui_find textequals="$name" >/dev/null 2>&1 || continue
     echo "   install chooser shown — selecting $name ..."
     ui_tap textequals="$name" || return 1
-    sleep 1
+    nap 1
     ui_dump || return 0
     for label in 'JUST ONCE' 'Just once' ONCE Once; do
       if ui_find textequals="$label" >/dev/null 2>&1; then ui_tap textequals="$label" || true; break; fi
@@ -183,7 +183,7 @@ c7_wait_install() {
       for label in LAUNCH Launch OPEN Open DONE Done; do
         if ui_find textequals="$label" >/dev/null 2>&1; then
           ui_tap textequals="$label" || return 1
-          sleep 2
+          nap 2
           case "$(focus_now)" in
             *"$PKG/"*) return 0 ;;
           esac

@@ -4,7 +4,7 @@
 #   ./run-scenarios.sh device1 1 com.example.app       device, scenario#, app to open
 #   ./run-scenarios.sh device1 1 -                     run scenario, open nothing
 # Interactive target selection lists installed third-party packages by number.
-#   env: TARGET_PREFIX=<package prefix>  narrow that list to one namespace
+#   env: TARGET_PREFIX=<package prefix>  narrow that list; asked at run time if unset
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Was DELAY_SCALE set by the user? Capture it BEFORE sourcing common.sh, which
@@ -33,9 +33,20 @@ if [ -z "$SEL" ]; then read -rp "scenario number: " SEL; fi
 TARGET="${CASES[$SEL]:-}"
 [ -n "$TARGET" ] || { echo "invalid selection: $SEL" >&2; exit 1; }
 
+# --- speed: one multiplier, applied to every scenario -------------------------
+# Every settle in every case is now DELAY_SCALE-aware (it was cases 1-3 only before).
+# 1 = the timings these flows were tuned with; below ~0.5 the Magisk screens start
+# being read before they have finished changing. Skipped if DELAY_SCALE is preset.
+if [ -z "$DELAY_SCALE_PRESET" ]; then
+  read -rp "UI delay scale — 1=normal, 0.5=faster, 2=slower/flaky device [1]: " DELAY_SCALE || DELAY_SCALE=""
+  DELAY_SCALE="${DELAY_SCALE:-1}"
+  case "$DELAY_SCALE" in ''|*[!0-9.]*) echo "  '$DELAY_SCALE' is not a number — using 1"; DELAY_SCALE=1;; esac
+  export DELAY_SCALE
+fi
+
 # Case 8 owns source selection: manual files do not require a connected phone.
 if [ "$(basename "$TARGET")" = case8-emulator.sh ]; then
-  export SOURCE_DEVICE="${1:-}" TARGET_PKG="${3:-}"
+  export SOURCE_DEVICE="${1:-}" TARGET_PKG="${3:-}"   # DELAY_SCALE/NAP_MAX already exported above
   exec bash "$TARGET"
 fi
 
@@ -45,12 +56,12 @@ adb devices | sed '1d;/^$/d' || true
 echo
 echo "== Known device profiles =="
 for n in $DEVICE_NAMES; do
-  printf "  %-8s %s\n" "$n" "$(device_serial "$n")"
+  printf "  %-8s %s\n" "$n" "$(device_serial "$n" 2>/dev/null || echo "(not configured)")"
 done
 echo
 DEV_NAME="${1:-}"
 if [ -z "$DEV_NAME" ]; then read -rp "device profile: " DEV_NAME; fi
-DEV_SERIAL="$(device_serial "$DEV_NAME")" || { echo "unknown profile: $DEV_NAME" >&2; exit 1; }
+DEV_SERIAL="$(device_serial "$DEV_NAME")" || { echo "cannot resolve device profile: $DEV_NAME" >&2; exit 1; }
 PIN="$(device_pin "$DEV_NAME")"
 export DEV_SERIAL DEV_NAME PIN
 source "$HERE/lib/common.sh"
@@ -59,6 +70,16 @@ source "$HERE/lib/device-ready.sh"
 # --- target app: DenyList-checked during the scenario AND opened after it -----
 TARGET_PKG="${3:-}"
 if [ -z "$TARGET_PKG" ]; then
+  # Ask for the namespace rather than keeping any client's package prefix in the repo.
+  # It lives in this process only — nothing is written to disk. Using ${VAR+set} means an
+  # exported TARGET_PREFIX (even an empty one) skips the question for non-interactive runs.
+  if [ -z "${TARGET_PREFIX+set}" ]; then
+    read -rp "target package prefix (blank = list all third-party apps): " TARGET_PREFIX || TARGET_PREFIX=""
+    TARGET_PREFIX="${TARGET_PREFIX#"${TARGET_PREFIX%%[![:space:]]*}"}"   # trim both ends
+    TARGET_PREFIX="${TARGET_PREFIX%"${TARGET_PREFIX##*[![:space:]]}"}"
+    TARGET_PREFIX="${TARGET_PREFIX%\*}"                                  # tolerate "com.example*"
+  fi
+  export TARGET_PREFIX
   echo "== Installed target apps on $DEV_NAME${TARGET_PREFIX:+ ($TARGET_PREFIX*)} =="
   PACKAGES=()
   package_count=0
@@ -108,15 +129,6 @@ export TARGET_PKG                          # case scripts use it for the DenyLis
 if [ -n "$TARGET_PKG" ]; then
   python3 "$HERE/lib/py/app-info.py" "$DEV_SERIAL" "$TARGET_PKG" \
     || echo 'WARN: app summary unavailable — continuing.' >&2
-fi
-
-# --- speed: delay scale for the Magisk state cases (those that call apply_state) ----
-# Skipped if DELAY_SCALE is already set (so `DELAY_SCALE=0.5 ./run-scenarios.sh ...` still works).
-if grep -q 'apply_state' "$TARGET" && [ -z "$DELAY_SCALE_PRESET" ]; then
-  read -rp "delay speed scale (1=normal, 0.5=faster; a minimum floor always applies) [1]: " DELAY_SCALE || DELAY_SCALE=""
-  DELAY_SCALE="${DELAY_SCALE:-1}"
-  case "$DELAY_SCALE" in ''|*[!0-9.]*) echo "  '$DELAY_SCALE' is not a number — using 1"; DELAY_SCALE=1;; esac
-  export DELAY_SCALE
 fi
 
 # --- run ----------------------------------------------------------------------

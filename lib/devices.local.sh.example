@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# devices.local.sh.example — copy to lib/devices.local.sh (git-ignored) and fill in.
+# This is machine-local configuration: it must never be committed.
+#
+#   cp lib/devices.local.sh.example lib/devices.local.sh
+
+# adb serial per profile (see `adb devices`). Profile name uppercased.
+# With no serial set, a profile resolves to the only attached device.
+BST_SERIAL_DEVICE1="your-serial-here"
+BST_SERIAL_DEVICE2="your-serial-here"
+
+# Lock-screen PIN per profile — digits only (enter_pin types keyevents).
+# Required for the cases that reboot (2 and 3): the post-reboot unlock reads it
+# directly, and the run-time prompt only fires if the screen is already locked at
+# the start. Leave unset for a device you unlock by hand.
+#BST_PIN_DEVICE1="123456"        # example only
+#BST_PIN_DEVICE2=""
