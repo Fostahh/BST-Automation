@@ -17,7 +17,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../lib/common.sh"                      # adbx(), launch(), ui_dump(), $UI_XML, LIB
 source "$HERE/../lib/mtmanager.sh"                    # MT Manager helpers: mt_launch_fresh/login/extract/convert
-FRIDAENV="$(cd "$HERE/../.." && pwd)/fridaenv"       # BST Tools/fridaenv
+# FRIDAENV comes from lib/base.sh via common.sh.
+detect_size          # mtmanager.sh locates MT Manager's bars by fractions of W/H
 
 unquote() { local s="$1"; s="${s%\"}"; s="${s#\"}"; s="${s%\'}"; s="${s#\'}"; printf '%s' "$s"; }
 

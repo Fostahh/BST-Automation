@@ -16,9 +16,12 @@ device_lock_state() {
     }'
 }
 
-# Use a subshell so root-aware input does not replace any scenario's own helpers.
+# Runs in a subshell so a PIN read here stays in this process and never leaks into the
+# scenario's environment. Input routing is common.sh's job: inp -> inpx -> has_su, which
+# caches the one su probe this run needs. This function used to repeat that probe and
+# shadow `inp` with a byte-identical copy.
 ensure_device_unlocked() (
-  local state has_su=0 attempt
+  local state attempt
   state="$(device_lock_state)" || {
     echo "!! Cannot determine the lock state of ${DEV_NAME:-$DEV_SERIAL}; scenario not started." >&2
     return 1
@@ -32,11 +35,6 @@ ensure_device_unlocked() (
   case "${PIN:-}" in
     *[!0-9]*) echo '!! Device profile PIN must contain only digits.' >&2; return 1 ;;
   esac
-  if adbx shell 'su -c id' >/dev/null 2>&1; then has_su=1; fi
-  inp() {
-    if [ "$has_su" = 1 ]; then adbx shell "su -c 'input $*'"
-    else adbx shell input "$@"; fi
-  }
   detect_size || return 1
   case "$W:$H" in
     *[!0-9:]*|:*|*:) echo '!! Cannot determine device screen size.' >&2; return 1 ;;

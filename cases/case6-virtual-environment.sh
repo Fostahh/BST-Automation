@@ -9,22 +9,14 @@
 #   env: SUPERCLONE_PKG  PARALLEL_PKG  GBOX_PKG
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"          # adbx(), launch(), focus_now(), LIB
+source "$HERE/../lib/common.sh"          # adbx(), launch(), focus_now(), ui_tap_fresh()
 
 SUPERCLONE_PKG="${SUPERCLONE_PKG:-com.polestar.super.clone}"   # label: "Super Clone"
 PARALLEL_PKG="${PARALLEL_PKG:-com.lbe.parallel.intl}"          # label: "Parallel Space"
 GBOX_PKG="${GBOX_PKG:-com.gbox.android}"                       # label: "GBox"
 
-# inpx (root-aware input), wake, ui_dump and $UI_XML all come from common.sh.
-
-# Tap a UI element by its on-screen text (uifind.py reads a uiautomator dump). rc=1 if absent.
-# ui_dump + $UI_XML (one reusable temp, auto-removed on exit) come from common.sh.
-ui_tap_text() {
-  local xy
-  ui_dump
-  xy="$(python3 "$LIB/py/uifind.py" "$UI_XML" "$@")" || return 1
-  inpx tap $xy
-}
+# inpx (root-aware input), wake and ui_tap_fresh all come from common.sh. This file used
+# to carry its own dump-then-tap as ui_tap_text — the third copy of the same four lines.
 
 # gate "question" -> Y or empty continues; n ends the script.
 gate() {
@@ -51,7 +43,7 @@ gate "3) Waiting for you to close every ads shown"
 echo "4) In Super Clone, tap the + button (bottom-right) and select: $PKG"
 gate "   Have you selected the target app"
 echo "5) tapping the Start button ..."
-ui_tap_text textequals=Start || ui_tap_text textcontains=Start \
+ui_tap_fresh textequals=Start || ui_tap_fresh textcontains=Start \
   || echo "   (Start button not found automatically — tap it manually)"
 gate "   Is it finished yet"
 

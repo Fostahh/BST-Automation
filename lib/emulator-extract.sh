@@ -12,6 +12,7 @@ export DEV_NAME DEV_SERIAL PIN TARGET_PKG
 source "$LIB8/common.sh"
 source "$LIB8/device-ready.sh"
 source "$LIB8/mtmanager.sh"
+detect_size          # mtmanager.sh locates MT Manager's bars by fractions of W/H
 ensure_device_unlocked
 mt_launch_fresh
 mt_require_login

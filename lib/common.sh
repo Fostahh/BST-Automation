@@ -29,64 +29,122 @@
 : "${DEV_SERIAL:?DEV_SERIAL not set — launch scenarios via run-scenarios.sh}"
 
 LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this lib/ dir (the .sh helpers; python lives in lib/py)
+. "$LIB/base.sh"                                      # BST_ROOT, FRIDAENV, pick_index, int_or
 
 # Magisk module titles as shown on the Modules screen (override per device/version).
 MOD_LSPOSED="${MOD_LSPOSED:-Zygisk - LSPosed}"
 MOD_ZNEXT="${MOD_ZNEXT:-Zygisk Next}"
 
 # --- tunable delays (seconds) -------------------------------------------------
-DELAY_SCALE=${DELAY_SCALE:-1}            # global multiplier for every nap
-NAP_MIN=${NAP_MIN:-0.3}                  # floor: no settle is ever shorter than this
-NAP_MAX=${NAP_MAX:-}                     # OPTIONAL cap per settle (empty = none). See nap().
-NAP_SHORT=${NAP_SHORT:-0.8}             # after a tap / minor settle
-NAP_MED=${NAP_MED:-1.2}                 # after typing / a toggle / a dialog
-NAP_NAV=${NAP_NAV:-1.5}                 # after a screen or navigation change
-NAP_SCROLL=${NAP_SCROLL:-0.6}           # after a scroll swipe
-NAP_LSPOSED=${NAP_LSPOSED:-3}           # wait for the LSPosed manager to open
-OPEN_SETTLE=${OPEN_SETTLE:-3}           # open_magisk_home: boot_id stability watch
-SETTLE_NEED=${SETTLE_NEED:-20}          # reboot_wait: stable seconds required
-SETTLE_MAX=${SETTLE_MAX:-200}           # wait_until_stable: overall cap
-BOOT_POLL=${BOOT_POLL:-2}               # boot/stability poll interval
-TAP_RETRIES=${TAP_RETRIES:-10}          # ui_tap_when attempts
-MAGISK_FG_TRIES=${MAGISK_FG_TRIES:-40}  # wait_magisk_fg attempts (x0.5s)
-MAGISK_WATCH_ALWAYS=${MAGISK_WATCH_ALWAYS:-0}   # 1 = run the full settle watch on EVERY Magisk open
-MAGISK_WATCH_ARMED=0                            # runtime: set by reboot_wait, cleared after a clean open
-# clamp the integer knobs to safe minimums so a too-low value can't break the flow
-[ "$OPEN_SETTLE"     -lt 2  ] 2>/dev/null && OPEN_SETTLE=2
-[ "$SETTLE_NEED"     -lt 6  ] 2>/dev/null && SETTLE_NEED=6
-[ "$BOOT_POLL"       -lt 1  ] 2>/dev/null && BOOT_POLL=1
-[ "$TAP_RETRIES"     -lt 3  ] 2>/dev/null && TAP_RETRIES=3
-[ "$MAGISK_FG_TRIES" -lt 10 ] 2>/dev/null && MAGISK_FG_TRIES=10
+# Every knob is validated HERE, where all paths meet, rather than at the prompt that asks
+# for one of them. The runner used to check only the DELAY_SCALE it had just read from the
+# keyboard, so DELAY_SCALE=abc in the environment sailed through to awk, coerced to 0, and
+# floored every settle in every case to NAP_MIN without a word. num_or/int_or (base.sh)
+# substitute the documented default and say which knob was rejected.
+DELAY_SCALE="$(num_or "${DELAY_SCALE:-1}" 1 DELAY_SCALE)"          # global nap multiplier
+NAP_MIN="$(num_or "${NAP_MIN:-0.3}" 0.3 NAP_MIN)"                  # floor: no settle is shorter
+NAP_MAX="${NAP_MAX:-}"                   # OPTIONAL cap per settle (empty = none). See nap().
+[ -z "$NAP_MAX" ] || NAP_MAX="$(num_or "$NAP_MAX" "" NAP_MAX)"     # junk cap = no cap
+NAP_SHORT="$(num_or "${NAP_SHORT:-0.8}" 0.8 NAP_SHORT)"            # after a tap / minor settle
+NAP_MED="$(num_or "${NAP_MED:-1.2}" 1.2 NAP_MED)"                  # after typing / toggle / dialog
+NAP_NAV="$(num_or "${NAP_NAV:-1.5}" 1.5 NAP_NAV)"                  # after a screen change
+NAP_SCROLL="$(num_or "${NAP_SCROLL:-0.6}" 0.6 NAP_SCROLL)"         # after a scroll swipe
+NAP_LSPOSED="$(num_or "${NAP_LSPOSED:-3}" 3 NAP_LSPOSED)"          # LSPosed manager opening
+MAGISK_WATCH_ALWAYS="$(int_or "${MAGISK_WATCH_ALWAYS:-0}" 0 MAGISK_WATCH_ALWAYS)"  # 1 = settle watch on EVERY open
+MAGISK_WATCH_ARMED=0                     # runtime: set by reboot_wait, cleared after a clean open
+# Integer knobs: validate before clamping. `[ abc -lt 2 ]` fails rather than compares, and
+# the old `2>/dev/null` swallowed that error and left the junk in place to detonate later
+# inside arithmetic — killing the case under `set -e` with nothing printed.
+OPEN_SETTLE="$(int_or "${OPEN_SETTLE:-3}" 3 OPEN_SETTLE)";     [ "$OPEN_SETTLE"     -lt 2  ] && OPEN_SETTLE=2
+SETTLE_NEED="$(int_or "${SETTLE_NEED:-20}" 20 SETTLE_NEED)";   [ "$SETTLE_NEED"     -lt 6  ] && SETTLE_NEED=6
+SETTLE_MAX="$(int_or "${SETTLE_MAX:-200}" 200 SETTLE_MAX)"
+BOOT_POLL="$(int_or "${BOOT_POLL:-2}" 2 BOOT_POLL)";           [ "$BOOT_POLL"       -lt 1  ] && BOOT_POLL=1
+TAP_RETRIES="$(int_or "${TAP_RETRIES:-10}" 10 TAP_RETRIES)";   [ "$TAP_RETRIES"     -lt 3  ] && TAP_RETRIES=3
+MAGISK_FG_TRIES="$(int_or "${MAGISK_FG_TRIES:-40}" 40 MAGISK_FG_TRIES)"; [ "$MAGISK_FG_TRIES" -lt 10 ] && MAGISK_FG_TRIES=10
 
 # nap <seconds> : the standard UI settle — max(NAP_MIN, <seconds>*DELAY_SCALE).
 # NAP_MAX can cap it, but it is OFF by default and should stay off for the Magisk
 # cases: a settle that is too short makes the NEXT ui_dump snapshot the PREVIOUS
 # screen, and the state readers (ui_checked/read_modules) then decide on stale data.
 # Retrying a tap cannot detect that, so speed here comes from DELAY_SCALE, knowingly.
-nap() {
-  local s
-  s=$(awk "BEGIN{v=$1*$DELAY_SCALE; lo=$NAP_MIN; if(v<lo)v=lo
-                 hi=\"$NAP_MAX\"+0; if(hi>0 && v>hi)v=hi; printf \"%.3f\", v}")
-  sleep "$s"
+#
+# The arithmetic needs awk (bash has no floats), but DELAY_SCALE/NAP_MIN/NAP_MAX are
+# fixed for the whole run and only ~19 distinct lengths are ever asked for, so each is
+# computed once and reused. bash 3.2 ships on macOS and has no associative arrays, hence
+# a string cache.
+#
+# _scale_into assigns to $_SCALED rather than echoing, because "$(_scaled ...)" would run
+# it in a subshell and throw every cache write away with it — a memo that silently never
+# memoises. Nothing calls nap inside a command substitution, so the cache persists.
+_NAP_CACHE=""
+_SCALED=""
+_scale_into() {   # _scale_into <seconds> <cap:1|0>  ->  sets $_SCALED
+  local key="$2:$1"
+  case "$_NAP_CACHE" in
+    *" $key="*) _SCALED="${_NAP_CACHE#*" $key="}"; _SCALED="${_SCALED%% *}"; return 0 ;;
+  esac
+  _SCALED=$(awk -v s="$1" -v scale="$DELAY_SCALE" -v lo="$NAP_MIN" -v cap="$NAP_MAX" -v docap="$2" \
+    'BEGIN{v=s*scale; if(v<lo)v=lo; c=cap+0; if(docap&&c>0&&v>c)v=c; printf "%.3f", v}')
+  _NAP_CACHE="$_NAP_CACHE $key=$_SCALED"
 }
+nap() { _scale_into "$1" 1; sleep "$_SCALED"; }
 # nap_long <seconds> : for waits that are NOT a UI settle and must not be capped —
 # a reboot handshake, keyguard coming back, another app's manager starting up.
-nap_long() {
-  local s; s=$(awk "BEGIN{v=$1*$DELAY_SCALE; lo=$NAP_MIN; if(v<lo)v=lo; printf \"%.3f\", v}")
-  sleep "$s"
-}
+nap_long() { _scale_into "$1" 0; sleep "$_SCALED"; }
 
 adbx() { command adb -s "$DEV_SERIAL" "$@"; }
 
+# adb_t <seconds> <adb args...> : adbx with a hard timeout, so a polling deadline cannot
+# hang forever on a device that dropped off the bus. macOS ships no coreutils `timeout`,
+# and spawning a python interpreter per call (what case 7 used to do) costs a process on
+# every iteration of loops that poll every 2s for up to ten minutes. A watchdog subshell
+# costs nothing and keeps the caller's stdout/stderr wiring intact.
+# `set -m` makes the backgrounded adb a process-group leader, so the watchdog can signal
+# the whole group (kill -TERM -$pid) instead of just adb. That matters inside "$(adb_t ...)":
+# a command substitution does not return until every writer has closed the pipe, so a
+# surviving grandchild keeps the caller blocked for the full duration of the call it was
+# supposed to abandon. Job-control notices are suppressed; the monitor flag is restored.
+adb_t() {
+  local secs="$1" pid watchdog rc=0 monitor=; shift
+  case "$-" in *m*) monitor=1 ;; esac
+  set -m
+  command adb -s "$DEV_SERIAL" "$@" &
+  pid=$!
+  [ -n "$monitor" ] || set +m
+  ( sleep "$secs"; kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid" 2>/dev/null || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  # 143 = SIGTERM: the watchdog fired. Report it as 124, the conventional timeout status.
+  [ "$rc" = 143 ] && { echo "adb timed out after ${secs}s: $*" >&2; return 124; }
+  return "$rc"
+}
+
+_PX_CACHE=""        # ratio->pixels, valid for the current W/H (cleared by detect_size)
 detect_size() {
   local out sz
   out=$(adbx shell wm size)
   sz=$(echo "$out" | awk -F': ' '/Override/{o=$2} /Physical/{p=$2} END{print (o?o:p)}' | tr -d '\r')
   W=${sz%x*}; H=${sz#*x}
   : "${W:?could not detect screen width}" "${H:?could not detect screen height}"
+  _PX_CACHE=""
 }
-px() { awk "BEGIN{printf \"%d\", $1*$W}"; }
-py() { awk "BEGIN{printf \"%d\", $1*$H}"; }
+# Memoised for the same reason as nap(), and assigning to $_RATIO for the same reason:
+# a value echoed from a subshell cannot carry the cache back out.
+_RATIO=""
+_ratio_into() {   # _ratio_into <ratio> <extent> <axis-tag>  ->  sets $_RATIO
+  local key="$3:$1"
+  case "$_PX_CACHE" in
+    *" $key="*) _RATIO="${_PX_CACHE#*" $key="}"; _RATIO="${_RATIO%% *}"; return 0 ;;
+  esac
+  _RATIO=$(awk -v r="$1" -v e="$2" 'BEGIN{printf "%d", r*e}')
+  _PX_CACHE="$_PX_CACHE $key=$_RATIO"
+}
+# px/py keep their echoing shape for any case script that calls them directly; swipr,
+# the hot path, goes through the setter so a scroll costs no subprocesses after the first.
+px() { _ratio_into "$1" "$W" x; printf '%s' "$_RATIO"; }
+py() { _ratio_into "$1" "$H" y; printf '%s' "$_RATIO"; }
 
 # Quoting for the device. `adb shell` does NOT pass argv through: it joins everything
 # into one string that the device's shell re-parses, so any path we interpolate must be
@@ -101,14 +159,31 @@ shq() {   # single-quote "$1" for the device shell: an embedded ' becomes '\''
 su_sh() { adbx shell "su -c $(shq "$1")"; }
 
 # Input: MIUI blocks injection for the shell user (INJECT_EVENTS), so on a rooted device
-# route it through su; on a non-rooted one (device2) plain `input` works. One probe, one
+# route it through su; on a non-rooted one plain `input` works. One probe, one
 # implementation — `inpx` is the real one, `inp` is the long-standing alias cases 1-4 call.
-HAS_SU=0
-if adbx shell 'su -c id' >/dev/null 2>&1; then HAS_SU=1; fi
-inpx() { if [ "$HAS_SU" = 1 ]; then adbx shell "su -c 'input $*'"; else adbx shell input "$@"; fi; }
+#
+# has_su is the single answer to "is there working root here?", cached after the first
+# call. It used to be asked three times per run — here at source time, again in
+# device-ready.sh, and a third time in case 4 — and the source-time copy charged an adb
+# round trip to every scenario, including ones that never send input.
+HAS_SU=""
+has_su() {
+  if [ -z "$HAS_SU" ]; then
+    if adbx shell 'su -c id' >/dev/null 2>&1; then HAS_SU=1; else HAS_SU=0; fi
+  fi
+  [ "$HAS_SU" = 1 ]
+}
+inpx() { if has_su; then adbx shell "su -c 'input $*'"; else adbx shell input "$@"; fi; }
 inp()  { inpx "$@"; }
 wake() { inpx keyevent 224 >/dev/null 2>&1 || true; }
-swipr() { inp swipe "$(px "$1")" "$(py "$2")" "$(px "$3")" "$(py "$4")" "${5:-300}"; }
+swipr() {   # swipr <x1 ratio> <y1 ratio> <x2 ratio> <y2 ratio> [ms]
+  local x1 y1 x2 y2
+  _ratio_into "$1" "$W" x; x1="$_RATIO"
+  _ratio_into "$2" "$H" y; y1="$_RATIO"
+  _ratio_into "$3" "$W" x; x2="$_RATIO"
+  _ratio_into "$4" "$H" y; y2="$_RATIO"
+  inp swipe "$x1" "$y1" "$x2" "$y2" "${5:-300}"
+}
 launch(){ adbx shell monkey -p "$1" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true; }
          # never fails: its output is suppressed, so a non-zero exit under `set -e`
          # would kill the scenario silently. Callers poll focus_now() to confirm.
@@ -129,7 +204,7 @@ u2_python() {
   [ -n "$U2_PY" ] && { echo "$U2_PY"; return 0; }
   local c
   for c in "$HOME/.bst-tools/venv/bin/python" \
-           "$(cd "$LIB/../.." 2>/dev/null && pwd)/fridaenv/bin/python" \
+           "$FRIDAENV/bin/python" \
            python3 python; do
     { [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; } || continue
     "$c" -c 'import uiautomator2' >/dev/null 2>&1 && { U2_PY="$c"; echo "$c"; return 0; }
@@ -159,32 +234,68 @@ u2_stop() {
   U2_READY=0; U2_PID=""; U2_DIR=""
 }
 
-ui_dump() {                      # snapshot the current screen into $UI_XML (overwritten each call)
+# A usable snapshot has a <hierarchy> root and at least one <node>. A busy screen (MT
+# Manager mid-signing is the reliable way to see it) makes uiautomator exit 0 having
+# written nothing, and a zero-byte or truncated $UI_XML then reads as "no elements on
+# screen" — which is indistinguishable from a real answer. Two greps, no interpreter.
+_ui_xml_ok() {
+  [ -s "$UI_XML" ] || return 1
+  grep -q '<hierarchy' "$UI_XML" && grep -q '<node' "$UI_XML"
+}
+# ui_dump : snapshot the current screen into $UI_XML (overwritten each call).
+# Returns non-zero when it could not produce a usable snapshot. Callers in a retry loop
+# should treat that as "try again"; callers that READ STATE from the result must not
+# carry on, because an empty dump makes every toggle look OFF.
+ui_dump() {
+  : > "$UI_XML"
   [ "$U2_READY" = 1 ] || u2_start || true
   if [ "$U2_READY" = 1 ]; then
     printf 'dump %s\n' "$UI_XML" >&7 2>/dev/null
     local resp=""; IFS= read -t 25 -r resp <&8 2>/dev/null || resp=""
-    [ "$resp" = "OK" ] && return 0
+    [ "$resp" = "OK" ] && _ui_xml_ok && return 0
     u2_stop                      # u2 hiccuped -> fall through to the legacy dump
   fi
   adbx exec-out "uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; cat /sdcard/ui.xml" 2>/dev/null | tr -d '\r' > "$UI_XML"
+  _ui_xml_ok
 }
 
 trap 'u2_stop; rm -f "$UI_XML"' EXIT      # stop the driver + remove the temp on exit
 ui_find() { python3 "$LIB/py/uifind.py" "$UI_XML" "$@"; }            # echoes per --print; rc1 if none
 ui_checked() { ui_find --print checked "$@" 2>/dev/null || true; } # "true"/"false"/"" (not found)
-# ui_tap taps against the caller's existing snapshot and never re-dumps: callers read
-# state from that same snapshot, so silently replacing it underneath them is unsafe.
+
+# Four tap helpers, because the difference between them is exactly what used to get
+# reimplemented per case (case 4 and case 6 each grew a private dump-then-tap; case 7 and
+# mtmanager.sh each grew a private retry-then-fail). Pick by what should happen on a miss:
+#
+#   ui_tap       tap from the CALLER'S existing snapshot, never re-dumps. rc1 if absent.
+#                Callers that read state from that snapshot need it left alone.
+#   ui_tap_fresh dump first, then tap. rc1 if absent.
+#   ui_tap_when  re-dump until it appears, then tap. WARNS and returns 0 if it never
+#                does — deliberately lenient, because cases 1-3 walk screens where a
+#                control's absence is itself a legitimate state, and the verify step
+#                reports the outcome. Do not use it to guard a destructive next step.
+#   ui_tap_req   the same retry loop, but rc1 with a message when it never appears.
 ui_tap() { local xy; xy="$(ui_find "$@" 2>/dev/null || true)"; [ -n "$xy" ] || return 1; inp tap $xy; }
-# ui_tap_when: re-dump until the element appears (slow screens, esp. just after boot), then tap it.
-ui_tap_when() {
+ui_tap_fresh() { ui_dump || return 1; ui_tap "$@"; }
+_ui_tap_retry() {
   local i
   for (( i=1; i<=TAP_RETRIES; i++ )); do
-    ui_dump
-    if ui_find "$@" >/dev/null 2>&1; then ui_tap "$@"; return 0; fi
+    # A tap can still miss after a successful find — the element may leave the screen in
+    # between — so a failed tap re-enters the loop rather than ending it.
+    if ui_dump && ui_find "$@" >/dev/null 2>&1; then
+      ui_tap "$@" && return 0
+    fi
     nap "$NAP_SHORT"
   done
+  return 1
+}
+ui_tap_when() {
+  _ui_tap_retry "$@" && return 0
   echo "  WARN: element not found after retries: $*" >&2; return 0   # best-effort; verify step reports the result
+}
+ui_tap_req() {
+  _ui_tap_retry "$@" && return 0
+  echo "  !! required element not found after retries: $*" >&2; return 1
 }
 
 # --- reboot & unlock ----------------------------------------------------------
@@ -303,8 +414,7 @@ open_magisk_settings() {            # -> Settings (DenyList section). The Settin
   ui_tap_when res=action_settings; nap "$NAP_MED"      # Settings gear
   local i
   for i in 1 2 3 4 5 6; do          # scroll until "Enforce DenyList" is on screen
-    ui_dump
-    ui_find textequals="Enforce DenyList" >/dev/null 2>&1 && return 0
+    if ui_dump && ui_find textequals="Enforce DenyList" >/dev/null 2>&1; then return 0; fi
     swipr 0.5 0.75 0.5 0.30 350; nap "$NAP_SCROLL"
   done
   echo "  WARN: DenyList section not found in Settings" >&2
@@ -320,14 +430,44 @@ dl_in_list() {    # exit 0 if pkg is in the denylist (exact package match)
     | awk -F'|' -v p="$1" '$1==p{f=1} END{exit f?0:1}'
 }
 
-# read_modules : set globals ZN, LP (ON/OFF) and MOD (ON if either). Modules screen must be open.
+# read_modules : set globals ZN, LP (ON/OFF) and MOD (ON if either). Modules screen must
+# be open. Returns non-zero when the screen could not be read at all, leaving the three
+# globals at UNKNOWN.
+#
+# This used to return 0 unconditionally, and a dump that produced nothing set ZN=OFF
+# LP=OFF MOD=OFF — identical to a genuine reading of "all modules disabled". Case 1 wants
+# exactly that state, so a failed dump made case 1 report PASS without having looked.
+# A missing snapshot and an absent row are now both distinguishable from "switch is off".
 read_modules() {
-  ui_dump
-  local z l
-  z="$(ui_checked --near-text "$MOD_ZNEXT"  res=module_indicator)"
-  l="$(ui_checked --near-text "$MOD_LSPOSED" res=module_indicator)"
-  ZN=OFF; [ "$z" = "true" ] && ZN=ON
-  LP=OFF; [ "$l" = "true" ] && LP=ON
+  ZN=UNKNOWN; LP=UNKNOWN; MOD=UNKNOWN
+  local z="" l="" i read_any=0
+  # Page down the list rather than reading one screenful. A module sitting below the fold
+  # came back empty, and the old code turned empty into OFF — a real state, indistinguishable
+  # from a genuine reading. With more modules installed than fit on screen, case 1 (which
+  # wants everything OFF) therefore reported PASS without having seen the module at all.
+  # Each title is read on whichever screen it appears on; the first definite answer sticks.
+  for (( i=1; i<=8; i++ )); do
+    if ui_dump; then
+      read_any=1
+      [ -n "$z" ] || z="$(ui_checked --near-text "$MOD_ZNEXT"  res=module_indicator)"
+      [ -n "$l" ] || l="$(ui_checked --near-text "$MOD_LSPOSED" res=module_indicator)"
+      { [ -n "$z" ] && [ -n "$l" ]; } && break
+    fi
+    swipr 0.5 0.75 0.5 0.30 350; nap "$NAP_SCROLL"
+  done
+  [ "$read_any" = 1 ] || { echo "  !! Modules screen unreadable (no usable UI snapshot)" >&2; return 1; }
+
+  [ "$z" = true ]  && ZN=ON
+  [ "$z" = false ] && ZN=OFF
+  [ "$l" = true ]  && LP=ON
+  [ "$l" = false ] && LP=OFF
+  # Both states must be definite. UNKNOWN cannot be folded into MOD, because "not known to
+  # be ON" is not the same as OFF, and every target state here is defined over both modules.
+  if [ "$ZN" = UNKNOWN ] || [ "$LP" = UNKNOWN ]; then
+    [ "$ZN" = UNKNOWN ] && echo "  !! '$MOD_ZNEXT' not found on the Modules list — set MOD_ZNEXT to its exact title" >&2
+    [ "$LP" = UNKNOWN ] && echo "  !! '$MOD_LSPOSED' not found on the Modules list — set MOD_LSPOSED to its exact title" >&2
+    return 1
+  fi
   MOD=OFF; { [ "$ZN" = ON ] || [ "$LP" = ON ]; } && MOD=ON
   return 0
 }
@@ -343,6 +483,19 @@ lsposed_action() {
 }
 
 # --- set + verify Enforce/DenyList via the UI (one Settings session) ----------
+# _ui_toggle_state <anchor-label> <resource-id> -> ON | OFF | UNKNOWN
+# UNKNOWN covers both "no usable snapshot" and "that row is not on screen". Keeping it
+# distinct from OFF matters: the old inline `[ "$(ui_checked ...)" = true ] && x=ON` read
+# an unreadable screen as OFF, which is a real answer for half the target states.
+_ui_toggle_state() {
+  ui_dump || { printf 'UNKNOWN'; return 0; }
+  case "$(ui_checked --near-text "$1" res="$2")" in
+    true)  printf 'ON' ;;
+    false) printf 'OFF' ;;
+    *)     printf 'UNKNOWN' ;;
+  esac
+}
+
 # set_denylist_state <want_enf> <want_dl> <pkg> <search>
 # Opens Settings once; for each control reads its state from the UI, taps only if it
 # differs from wanted, then reads it back in place to confirm. Mismatch -> VERIFY_RC=1.
@@ -352,27 +505,39 @@ set_denylist_state() {
   open_magisk_settings
 
   # Enforce DenyList toggle — read, toggle if wrong, read back.
-  ui_dump
-  local uenf=OFF; [ "$(ui_checked --near-text 'Enforce DenyList' res=selector_indicator)" = true ] && uenf=ON
+  local uenf; uenf="$(_ui_toggle_state 'Enforce DenyList' selector_indicator)"
   if [ "$uenf" != "$wenf" ]; then
     echo "  Enforce DenyList $uenf -> $wenf"
     ui_tap_when --near-text "Enforce DenyList" res=selector_indicator; nap "$NAP_MED"
-    ui_dump; uenf=OFF; [ "$(ui_checked --near-text 'Enforce DenyList' res=selector_indicator)" = true ] && uenf=ON
+    uenf="$(_ui_toggle_state 'Enforce DenyList' selector_indicator)"
   fi
   echo "  enforce: $uenf (want $wenf)"
   if [ "$uenf" = "$wenf" ]; then echo "  enforce PASS"; else echo "  enforce FAIL" >&2; VERIFY_RC=1; fi
 
   # Target's denylist checkbox — Configure DenyList, search, read, toggle if wrong, read back.
-  ui_tap_when textequals="Configure DenyList"; nap "$NAP_NAV"
-  ui_tap_when clickable=true desccontains=Search || ui_tap_when res=search_button; nap "$NAP_SHORT"
+  #
+  # These two taps are REQUIRED, not best-effort. ui_tap_when returns 0 even when the
+  # element never appeared, so a miss here used to fall through to `inp text "$search"`
+  # and type the target package id into whatever happened to hold focus — some other
+  # app's search box or message field. The verdict still came out FAIL, but the name had
+  # already been typed somewhere it did not belong.
+  if ! ui_tap_req textequals="Configure DenyList"; then
+    echo "  denylist FAIL — 'Configure DenyList' never appeared; target name not typed" >&2
+    VERIFY_RC=1; back; nap 0.5; return 0
+  fi
+  nap "$NAP_NAV"
+  if ! { ui_tap_req clickable=true desccontains=Search || ui_tap_req res=search_button; }; then
+    echo "  denylist FAIL — DenyList search box not found; target name not typed" >&2
+    VERIFY_RC=1; back; nap 0.5; return 0
+  fi
+  nap "$NAP_SHORT"
   inp text "$search"; nap "$NAP_NAV"
-  ui_dump
-  local uchk=OFF; [ "$(ui_checked --near-text "$pkg" res=hide_expand_icon)" = true ] && uchk=ON
+  local uchk; uchk="$(_ui_toggle_state "$pkg" hide_expand_icon)"
   if [ "$uchk" != "$wdl" ]; then
     echo "  target '$pkg' $uchk -> $wdl"
     ui_tap_when textequals="$pkg"; nap "$NAP_SHORT"                            # tap the target package row first
     ui_tap_when --near-text "$pkg" res=hide_expand_icon; nap "$NAP_SHORT"      # then toggle its checkbox
-    ui_dump; uchk=OFF; [ "$(ui_checked --near-text "$pkg" res=hide_expand_icon)" = true ] && uchk=ON
+    uchk="$(_ui_toggle_state "$pkg" hide_expand_icon)"
   fi
   echo "  denylist checkbox: $uchk (want $wdl)"
   if [ "$uchk" = "$wdl" ]; then echo "  denylist PASS"; else echo "  denylist FAIL" >&2; VERIFY_RC=1; fi
@@ -385,7 +550,9 @@ set_denylist_state() {
 verify_modules() {
   local wmod="$1" reread="$2"
   echo "Modules (verify via UI):"
-  if [ "$reread" = 1 ]; then open_magisk_modules; read_modules
+  if [ "$reread" = 1 ]; then
+    open_magisk_modules
+    read_modules || { echo "  modules FAIL — state could not be read" >&2; VERIFY_RC=1; return 0; }
   else echo "  unchanged — reusing the initial UI read"; fi
   echo "  modules: ZN=$ZN LP=$LP (want $wmod)"
   if [ "$MOD" = "$wmod" ]; then echo "  modules PASS"; else echo "  modules FAIL" >&2; VERIFY_RC=1; fi
@@ -400,7 +567,14 @@ apply_state() {
   local wmod="$1" wenf="$2" wdl="$3" pkg="$4" search="$5"
   VERIFY_RC=0
 
-  open_magisk_modules; read_modules
+  open_magisk_modules
+  # Without a trustworthy starting state there is nothing to diff against, and guessing
+  # would mean toggling modules based on a blank screen. Stop and let the verdict be FAIL.
+  if ! read_modules; then
+    echo "!! cannot read the current module state — refusing to change it blind." >&2
+    VERIFY_RC=1
+    return 0
+  fi
   local cenf=OFF; if [ "$(dl_enforced)" = "1" ]; then cenf=ON; fi
   local cdl=OFF;  if dl_in_list "$pkg"; then cdl=ON; fi
   echo "current: modules=$MOD (ZN=$ZN LP=$LP)  enforce=$cenf  denylist=$cdl"
@@ -436,8 +610,10 @@ open_target() {
   if [ -n "${TARGET_PKG:-}" ]; then echo "opening target app: $TARGET_PKG"; launch "$TARGET_PKG"; fi
 }
 
-# VERIFY_RC defaults to 1 (FAIL) so a case that never verified cannot report a false PASS.
-VERIFY_RC=${VERIFY_RC:-1}
+# VERIFY_RC starts at 1 (FAIL) so a case that never verified cannot report a false PASS.
+# A plain assignment, deliberately: `${VERIFY_RC:-1}` let the environment seed the verdict,
+# and VERIFY_RC=0 in the caller's shell would have printed PASS without checking anything.
+VERIFY_RC=1
 verdict_exit() {
   echo
   if [ "${VERIFY_RC:-1}" = 0 ]; then

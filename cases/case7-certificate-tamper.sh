@@ -8,52 +8,25 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../lib/common.sh"
 
-# Bound individual ADB calls too, so polling deadlines cannot hang on a lost device.
-adbx() {
-  python3 - "$DEV_SERIAL" "${ADB_TIMEOUT:-45}" "$@" <<'PY'
-import subprocess, sys
-try:
-    result = subprocess.run(["adb", "-s", sys.argv[1], *sys.argv[3:]],
-                            timeout=int(sys.argv[2]))
-    sys.exit(result.returncode)
-except subprocess.TimeoutExpired:
-    print("ADB operation timed out", file=sys.stderr)
-    sys.exit(124)
-PY
-}
+# Bound every ADB call, so a polling deadline cannot hang on a device that dropped off
+# the bus. adb_t (common.sh) is a bash watchdog; this used to spawn a python interpreter
+# per call, inside loops that poll every 2s for up to ten minutes.
+adbx() { adb_t "${ADB_TIMEOUT:-45}" "$@"; }
 source "$HERE/../lib/mtmanager.sh"
 
 c7_fail() { echo "!! $*" >&2; return 1; }
-c7_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-# Case-local strict snapshots/retries; existing scenarios retain their behavior.
-ui_dump() {
-  # Busy signing/compression screens can prevent uiautomator from producing a
-  # file even when it exits successfully. Never read/reuse an old snapshot.
-  : > "$UI_XML"
-  adbx shell 'rm -f /sdcard/ui.xml && uiautomator dump /sdcard/ui.xml && test -s /sdcard/ui.xml' >/dev/null 2>&1 || return 1
-  adbx shell cat /sdcard/ui.xml > "$UI_XML" 2>/dev/null || { : > "$UI_XML"; return 1; }
-  python3 - "$UI_XML" <<'PY'
-import sys, xml.etree.ElementTree as ET
-try:
-    root = ET.parse(sys.argv[1]).getroot()
-    sys.exit(0 if root.tag == "hierarchy" and root.find("node") is not None else 1)
-except (OSError, ET.ParseError):
-    sys.exit(1)
-PY
-}
-ui_tap_when() {
-  local i
-  for i in 1 2 3 4 5 6 7 8; do
-    if ui_dump && ui_find "$@" >/dev/null 2>&1; then ui_tap "$@"; return $?; fi
-    sleep 1
-  done
-  c7_fail "UI element not found: $*"
-}
+# This case used to override ui_dump and ui_tap_req with strict versions of its own, and
+# carried its own single-quoter beside common.sh's shq. All three now come from common.sh:
+# ui_dump validates the snapshot and returns non-zero when it is unusable (a busy signing
+# screen makes uiautomator exit 0 having written nothing), and ui_tap_req is the retry
+# loop that actually reports a miss. Dropping the overrides also returns this case to the
+# uiautomator2 dump path — it was pinned to the ~2s legacy dump, on the case with by far
+# the longest polling loops.
 
 c7_file_stamp() {
   local quoted
-  quoted="$(c7_quote "$1")"
+  quoted="$(shq "$1")"
   adbx shell "if [ -s $quoted ]; then stat -c '%s:%Y' $quoted; fi" | tr -d '\r'
 }
 
@@ -67,8 +40,8 @@ c7_scheme_matches() {
 c7_set_scheme() {
   ui_dump || return 1
   if ! c7_scheme_matches; then
-    ui_tap_when --near-text Scheme res=text1 || return 1
-    ui_tap_when textequals='V1 + V2 + V3' || return 1
+    ui_tap_req --near-text Scheme res=text1 || return 1
+    ui_tap_req textequals='V1 + V2 + V3' || return 1
     nap 0.5
     ui_dump || return 1
     c7_scheme_matches || { c7_fail 'Signing Scheme did not become V1 + V2 + V3.'; return 1; }
@@ -142,13 +115,13 @@ c7_sign() {
   PRE_SIGN_STAMP="$(c7_file_stamp "$SIGNED_PATH")" || return 1
   mt_locate_tap_file "$extracted" || return 1
   case "$extracted" in
-    *.apks) ui_tap_when textequals='Sign file' || return 1 ;;
+    *.apks) ui_tap_req textequals='Sign file' || return 1 ;;
     *.apk)
-      ui_tap_when res=button3 textequals=FUNCTION || return 1
-      ui_tap_when textequals='Sign APK' || return 1 ;;
+      ui_tap_req res=button3 textequals=FUNCTION || return 1
+      ui_tap_req textequals='Sign APK' || return 1 ;;
   esac
   c7_set_scheme || return 1
-  ui_tap_when res=button1 textequals=OK || return 1
+  ui_tap_req res=button1 textequals=OK || return 1
   c7_wait_signed
 }
 
@@ -226,10 +199,10 @@ c7_install() {
     fi
   fi
   # Signing leaves us in the extraction folder. Tap the new file right there.
-  ui_tap_when textequals="$(basename "$SIGNED_PATH")" || return 1
+  ui_tap_req textequals="$(basename "$SIGNED_PATH")" || return 1
   case "$SIGNED_PATH" in
-    *.apks) ui_tap_when textequals=Install || return 1 ;;
-    *.apk) ui_tap_when res=button1 textequals=INSTALL || return 1 ;;
+    *.apks) ui_tap_req textequals=Install || return 1 ;;
+    *.apk) ui_tap_req res=button1 textequals=INSTALL || return 1 ;;
   esac
   c7_wait_install
 }
@@ -246,8 +219,6 @@ c7_main() {
   adbx shell pm path --user current "$PKG" | tr -d '\r' | grep -q '^package:' \
     || { c7_fail "Target package is not installed: $PKG"; return 1; }
   detect_size
-  # Shared MT scrolling uses swipr -> inp; route input correctly on non-rooted devices too.
-  inp() { inpx "$@"; }
   echo "Case 7: extract and re-sign $PKG on ${DEV_NAME:-$DEV_SERIAL}"
   mt_launch_fresh || return 1
   mt_require_login || return 1

@@ -9,11 +9,12 @@
 #                       0 = start it headless over adb (setsid)
 #        OPEN_MT=1|0    launch MT Manager as a visual aid in the headless path
 #        FORCE_SERVER=1 stop any running server and launch our own (default: reuse it)
+#        MT_PKG=<pkg>   MT Manager package (default bin.mt.plus, via lib/mtmanager.sh)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../lib/common.sh"                      # adbx(), inp(), launch(), focus_now(), swipr(), detect_size()
-
-FRIDAENV="$(cd "$HERE/../.." && pwd)/fridaenv"       # BST Tools/fridaenv
+source "$HERE/../lib/mtmanager.sh"                   # mt_jump_to() — was duplicated here
+# FRIDAENV and BST_ROOT come from lib/base.sh via common.sh.
 HOOK_DIR="${HOOK_DIR:-}"                             # set HOOK_DIR to your own folder of .js hooks
 
 # --- where are the hooks? -----------------------------------------------------
@@ -64,12 +65,9 @@ EOF
            "$(ls "${HOOK_CANDS[$n]}"/*.js 2>/dev/null | grep -c . || true)"
        done
        read -rp "   hooks folder number (blank = type a path instead): " hsel || hsel=""
-       case "$hsel" in
-         ''|*[!0-9]*) : ;;
-         *) if [ "$hsel" -ge 1 ] && [ "$hsel" -le "${#HOOK_CANDS[@]}" ]; then
-              HOOK_DIR="${HOOK_CANDS[$((hsel-1))]}"
-            fi ;;
-       esac
+       if hidx="$(pick_index "${#HOOK_CANDS[@]}" "$hsel")"; then
+         HOOK_DIR="${HOOK_CANDS[$((hidx-1))]}"      # the menu is 1-based, this array 0-based
+       fi
        ;;
   esac
 fi
@@ -86,24 +84,20 @@ while ! ls "$HOOK_DIR"/*.js >/dev/null 2>&1; do
   case "$HOOK_DIR" in "~"*) HOOK_DIR="$HOME${HOOK_DIR#\~}";; esac   # read does not expand ~
 done
 SERVER_DIR="${SERVER_DIR:-/data/local/tmp}"          # MT Manager shows this as "tmp" (no spaces)
-MT_PKG="bin.mt.plus"
 FRIDA_PORT="${FRIDA_PORT:-27042}"   # frida's default; the stale-server checks key off it
 
 # --- UI automation helpers (tap by on-screen text/id, not fixed coordinates) --
-# ui_dump + $UI_XML (one reusable temp, auto-removed on exit) come from common.sh.
-# ui_find comes from common.sh. ui_tap below stays local: it dumps BEFORE tapping,
-# unlike common.sh's ui_tap which taps from the existing snapshot.
-ui_tap() {                                           # dump, find, tap; rc=1 if not found
-  local xy; ui_dump; xy="$(ui_find "$@")" || return 1
-  inp tap $xy
-}
+# ui_dump/$UI_XML/ui_find/ui_tap_fresh all come from common.sh. This file used to carry
+# its own dump-then-tap under the name ui_tap, shadowing common.sh's snapshot-only one;
+# that behaviour is ui_tap_fresh now. ui_tap_scroll stays local — swiping a specific
+# column is an MT Manager two-pane concern no other case has.
 ui_tap_scroll() {                                    # ui_tap_scroll <tries> [--sx <xratio>] <matchers...>
   local tries="$1"; shift
   local sx=0.5                                        # default: swipe down the middle
   [ "${1:-}" = "--sx" ] && { sx="$2"; shift 2; }      # or down a specific column (MT Manager panes)
   local i xy
   for ((i=1;i<=tries;i++)); do
-    ui_dump; xy="$(ui_find "$@")" && { inp tap $xy; return 0; }
+    if ui_dump && xy="$(ui_find "$@")"; then inp tap $xy; return 0; fi
     swipr "$sx" 0.80 "$sx" 0.33 250; nap 0.6        # scroll the list down one page-ish
   done
   return 1
@@ -113,10 +107,11 @@ ui_tap_scroll() {                                    # ui_tap_scroll <tries> [--
 # focused. Swiping the middle scrolls nothing, so find the pane showing SERVER_DIR
 # (by the x of its path bar) and return the x-ratio to swipe on (left ~0.25 / right ~0.75).
 pane_scroll_x() {
-  ui_dump
+  ui_dump || { echo 0.75; return 0; }                 # unreadable: assume the right pane
   local xy cx
-  xy="$(ui_find textcontains="$SERVER_DIR" maxy=300 2>/dev/null || true)"
-  [ -z "$xy" ] && xy="$(ui_find textcontains=data/local/tmp maxy=300 2>/dev/null || true)"
+  local top; top="$(py 0.13)"                         # the path-bar strip, not a pixel count
+  xy="$(ui_find textcontains="$SERVER_DIR" maxy="$top" 2>/dev/null || true)"
+  [ -z "$xy" ] && xy="$(ui_find textcontains=data/local/tmp maxy="$top" 2>/dev/null || true)"
   cx="${xy%% *}"
   if [ -n "$cx" ] && [ "$cx" -lt "$(( ${W:-1080} / 2 ))" ]; then echo 0.25; else echo 0.75; fi
 }
@@ -168,21 +163,6 @@ open_mt_manager() {
   nap 1
 }
 
-mt_jump_to() {                                       # navigate via the "Jump to path" dialog
-  local path="$1" dels
-  dels="$(printf '67 %.0s' $(seq 1 80))"             # KEYCODE_DEL x80 (clear the field)
-  ui_tap clickable=true cls=TextView textprefix=/ maxy=300 || { echo "   path bar not found" >&2; return 1; }
-  nap 1
-  ui_tap cls=EditText || { echo "   'Jump to path' input not found" >&2; return 1; }
-  nap 0.4
-  inp keyevent 123                                   # MOVE_END
-  inp keyevent $dels                                 # clear whatever was pre-filled
-  inp text "$path"
-  nap 0.3
-  { ui_tap textequals=OK res=button1 || ui_tap textequals=OK; } || { echo "   OK button not found" >&2; return 1; }
-  nap 1.2
-}
-
 # --- 3+4) frida version, matched server, launch ------------------------------
 server_pid() {   # PID of the process whose cmdline contains "$1" (empty if none)
   # Read the process table and filter here rather than using `pgrep -f`: pgrep matches
@@ -214,12 +194,14 @@ stop_frida() {   # clear every frida-server on the device, whatever it is called
 
 terminal_up() {  # true once the executor terminal (or Termux) is on screen
   case "$(focus_now)" in *com.termux*) return 0;; esac
-  ui_dump
+  ui_dump || return 1
   ui_find textequals=Esc >/dev/null 2>&1 || ui_find textequals=Ctrl >/dev/null 2>&1
 }
 
 terminal_error() {   # best-effort: scrape error-looking text off the console (may be empty)
-  ui_dump
+  # Raw-XML scrape on purpose: it greps English keywords across every node, so entity
+  # encoding cannot change the outcome, and a failed dump must not break diagnostics.
+  ui_dump || return 0
   grep -oE 'text="[^"]*"' "$UI_XML" | sed 's/^text="//;s/"$//' \
     | grep -iE 'error|unable|failed|denied|not executable|cannot execute|no such|already in use|bind|refused|segmentation|abort|fatal' \
     || true
@@ -237,7 +219,7 @@ ui_launch_server() {   # drive MT Manager: tmp folder -> server -> Script execut
   ui_tap_scroll 6 textequals="Script executor" || { echo "   'Script executor' option not found" >&2; return 1; }
   nap 1.2
   echo "   tapping EXECUTE (runs with root) ..."
-  ui_tap textequals=EXECUTE || { echo "   EXECUTE button not found" >&2; return 1; }
+  ui_tap_fresh textequals=EXECUTE || { echo "   EXECUTE button not found" >&2; return 1; }
   # wait for the terminal console to appear
   local n=0
   until terminal_up; do
@@ -275,7 +257,7 @@ bring_up_server() {
   [ -n "$SERVER" ] || SERVER=$(printf '%s\n' "$listing" | grep -F "$FRIDA_VER" | head -n1 || true)
   if [ -z "$SERVER" ]; then
     echo "!! no frida-server matching $FRIDA_VER ($arch) in $SERVER_DIR on $DEV_NAME." >&2
-    if ! adbx shell 'su -c id' >/dev/null 2>&1; then
+    if ! has_su; then
       echo "   this device has no working su — case 4 needs root (Magisk)." >&2
     elif [ -z "$listing" ]; then
       local want="frida-server-$FRIDA_VER-android-$arch"
@@ -381,9 +363,11 @@ pick_hook() {
     printf "   %d) %s\n" "$i" "$(basename "$f")"
   done
   [ "$i" -gt 0 ] || { echo "   no .js hooks in $HOOK_DIR" >&2; exit 1; }
-  read -rp "hook number: " sel
-  HOOK="${HOOKS[$sel]:-}"
-  [ -n "$HOOK" ] || { echo "invalid selection: $sel" >&2; exit 1; }
+  read -rp "hook number: " sel || sel=""
+  local idx
+  idx="$(pick_index "$i" "$sel")" \
+    || { echo "invalid hook: ${sel:-<blank>} — choose 1-$i" >&2; exit 1; }
+  HOOK="${HOOKS[$idx]}"
 }
 
 run_hook() {

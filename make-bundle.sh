@@ -30,8 +30,7 @@ find "$STAGE/Automation" \( -name '*.bak' -o -name '.DS_Store' -o -name '*.apk' 
 #!/usr/bin/env bash
 # bst-tools.sh — BST Android security-testing scenarios, self-contained (generated).
 #
-#   ./bst-tools.sh                      interactive: pick device, scenario, target app
-#   ./bst-tools.sh device1 5 com.example   device profile, scenario number, package
+#   ./bst-tools.sh      interactive: every choice is prompted (no arguments)
 #
 # Needs on this Mac: adb, python3 (always); frida (case 4); android-unpinner
 # (case 5, also supplies aapt2); Android emulator + an AVD (case 8).
@@ -54,7 +53,8 @@ echo "APKs retrieved by cases 5/8 are kept in: $EXTRACTED_DIR"
 # Case 4 uses this to find a folder of .js frida hooks next to the bundle.
 export BST_LAUNCH_DIR="${BST_LAUNCH_DIR:-$PWD}"
 # Run (not exec) so the trap still cleans the unpacked copy up afterwards.
-"$DIR/Automation/run-scenarios.sh" "$@"
+# run-scenarios.sh takes no arguments: it prompts for platform, scenario, device, target.
+"$DIR/Automation/run-scenarios.sh"
 exit $?
 __PAYLOAD__
 HDR

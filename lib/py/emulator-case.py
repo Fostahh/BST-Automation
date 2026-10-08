@@ -13,6 +13,9 @@ import zipfile
 
 PYLIB = Path(__file__).resolve().parent        # Automation/lib/py
 LIB = PYLIB.parent                            # Automation/lib (the .sh helpers)
+# Same tree as lib/base.sh: BST_ROOT holds Automation/ and the author's fridaenv/.
+# run-scenarios.sh exports it; the fallback keeps a direct `python3 emulator-case.py` working.
+BST_ROOT = Path(os.environ.get("BST_ROOT") or LIB.parents[1])
 
 
 def _nap(seconds):
@@ -88,7 +91,7 @@ def find_aapt():
         packaged = str(Path(android_unpinner.__file__).parent / f"vendor/build_tools/{platform}/aapt2")
     except Exception:
         packaged = None
-    bundled = LIB.parents[1] / f"fridaenv/android-unpinner/android_unpinner/vendor/build_tools/{platform}/aapt2"
+    bundled = BST_ROOT / f"fridaenv/android-unpinner/android_unpinner/vendor/build_tools/{platform}/aapt2"
     sdk = Path(os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
                or Path.home() / "Library/Android/sdk")
     candidates = ([override] if override else [shutil.which("aapt2"), packaged, str(bundled),
