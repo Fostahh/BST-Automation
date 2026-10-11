@@ -67,5 +67,6 @@ bst-extracted/
 # Generated hand-over bundle (rebuild with ./make-bundle.sh)
 bst-tools.sh
 
-# machine-local device config (serials, PINs)
-lib/devices.local.sh
+# git bundles. A backup made inside the repo and committed by accident would ship an
+# entire history in a single file — including whatever an earlier scrub removed from it.
+*.bundle
