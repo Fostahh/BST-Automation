@@ -26,23 +26,20 @@ hook_id() {   # device:inode — "hooks" and "Hooks" are the same folder on a
               # case-insensitive volume, and symlinked copies collapse too
   stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || printf '%s' "$1"
 }
-hook_scan() { # folders holding .js files, hook-looking names first
-  local base="$1" depth=4
-  [ "$base" = "$HOME" ] && depth=2        # don't trawl a whole home directory
-  # Prune the parts of a python venv that carry their OWN .js (site-packages), but NOT the
-  # venv directory itself: the convention here is to keep the hooks INSIDE it, next to
-  # android-unpinner, so pruning '*venv*' hid exactly the folder being searched for —
-  # BST-Tools/pythonvenv/Hooking/*.js found nothing at all.
+hook_scan() { # directories holding .js files, no more than two levels below $base
+  local base="$1" depth=3
+  # Depth is the whole filter, which is why there is no list of names to skip. Hooks sit
+  # a level or two from the script — BST-Tools/Hooking, or BST-Tools/pythonvenv/Hooking —
+  # whereas the .js a python venv carries of its own is always deeper: android-unpinner
+  # bundles scripts 4 levels in, site-packages 5. Naming '*venv*' as a prune was both
+  # unnecessary and actively wrong, since it skipped the folder being searched for.
+  [ "$base" = "$HOME" ] && depth=2        # $HOME/Library alone would take minutes
   find -L "$base" -mindepth 1 -maxdepth "$depth" \
-       \( -name 'node_modules' -o -name '.*' -o -name 'bst-extracted' \
-          -o -name 'site-packages' -o -name 'dist-packages' \) -prune -o \
+       \( -name '.*' -o -name 'node_modules' \) -prune -o \
        -type f -name '*.js' -print 2>/dev/null \
     | sed 's#/[^/]*$##' | awk '!seen[$0]++' \
-    | awk '{ n=$0; sub(/.*\//,"",n); l=tolower(n)  # rank on the folder name, not the whole
-             # A folder actually CALLED hooks outranks one that merely mentions scripts:
-             # android-unpinner ships frida scripts of its own, which you did not write.
-             r = (l ~ /^hook(s|ing)?$/) ? 0 : (l ~ /hook|unpin|frida|script/) ? 1 : 2
-             print r"\t"$0 }' \
+    | awk '{ n=$0; sub(/.*\//,"",n)            # rank on the folder name, not the whole
+             r = (tolower(n) ~ /hook|unpin|frida|script/) ? 0 : 1; print r"\t"$0 }' \
     | sort -s -k1,1n | cut -f2-
 }
 
