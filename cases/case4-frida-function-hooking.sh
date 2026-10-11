@@ -8,7 +8,8 @@
 #        UI_EXEC=1|0    1 = start the server by hand via MT Manager's Script executor
 #                       0 = start it headless over adb (setsid)
 #        OPEN_MT=1|0    launch MT Manager as a visual aid in the headless path
-#        FORCE_SERVER=1 stop any running server and launch our own (default: reuse it)
+#        FORCE_SERVER=0 reuse a server that is already answering instead of restarting
+#                       it. Default is 1: stop whatever holds the port, then relaunch.
 #        MT_PKG=<pkg>   MT Manager package (default bin.mt.plus, via lib/mtmanager.sh)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -28,13 +29,20 @@ hook_id() {   # device:inode — "hooks" and "Hooks" are the same folder on a
 hook_scan() { # folders holding .js files, hook-looking names first
   local base="$1" depth=4
   [ "$base" = "$HOME" ] && depth=2        # don't trawl a whole home directory
+  # Prune the parts of a python venv that carry their OWN .js (site-packages), but NOT the
+  # venv directory itself: the convention here is to keep the hooks INSIDE it, next to
+  # android-unpinner, so pruning '*venv*' hid exactly the folder being searched for —
+  # BST-Tools/pythonvenv/Hooking/*.js found nothing at all.
   find -L "$base" -mindepth 1 -maxdepth "$depth" \
        \( -name 'node_modules' -o -name '.*' -o -name 'bst-extracted' \
-          -o -name '*venv*' -o -name 'site-packages' \) -prune -o \
+          -o -name 'site-packages' -o -name 'dist-packages' \) -prune -o \
        -type f -name '*.js' -print 2>/dev/null \
     | sed 's#/[^/]*$##' | awk '!seen[$0]++' \
-    | awk '{ n=$0; sub(/.*\//,"",n)            # rank on the folder name, not the whole
-             r = (tolower(n) ~ /hook|unpin|frida|script/) ? 0 : 1; print r"\t"$0 }' \
+    | awk '{ n=$0; sub(/.*\//,"",n); l=tolower(n)  # rank on the folder name, not the whole
+             # A folder actually CALLED hooks outranks one that merely mentions scripts:
+             # android-unpinner ships frida scripts of its own, which you did not write.
+             r = (l ~ /^hook(s|ing)?$/) ? 0 : (l ~ /hook|unpin|frida|script/) ? 1 : 2
+             print r"\t"$0 }' \
     | sort -s -k1,1n | cut -f2-
 }
 
@@ -278,31 +286,52 @@ bring_up_server() {
   if [ "${UI_EXEC:-1}" = "1" ]; then
     detect_size                                      # swipr/ratio taps need the screen size
     # A server may already be running: from an earlier run, a boot script, or a root
-    # manager that keeps one up. If the host can talk to it, REUSE it. Do not try to
-    # replace it: on a KernelSU device the su domain is blind to the process table
-    # (ps/lsof/proc all come back empty), so stop_frida cannot kill what it cannot see
-    # and the hand-launch then dies with "Error binding to address ... already in use".
-    # FORCE_SERVER=1 insists on stopping it and launching our own instead.
-    if [ "${FORCE_SERVER:-0}" != 1 ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-      echo "   a frida-server is already running on $DEV_NAME and answering — reusing it."
+    # manager that keeps one up. On Magisk the port holder is visible and killable, so the
+    # default is to STOP it and launch our own — reusing a server of unknown provenance
+    # means the scenario no longer controls what is instrumenting the app.
+    #
+    # KernelSU is the exception the old default was built around: there the su domain is
+    # blind to the process table (ps/lsof/proc all come back empty), so stop_frida cannot
+    # kill what it cannot see. That is handled below by falling back to the server that is
+    # already answering, rather than ending the case. FORCE_SERVER=0 skips the restart.
+    local stale holder
+    stale="$(server_pid "$SERVER")"
+    [ -n "$stale" ] || stale="$(server_pid frida-server)"
+    holder="$(port_pid "$FRIDA_PORT")"
+    [ -n "$stale" ] || stale="$holder"
+
+    if [ "${FORCE_SERVER:-1}" = 0 ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+      echo "   FORCE_SERVER=0 — reusing the frida-server already answering on $DEV_SERIAL."
       echo ">> frida-server ready (reused)."
       return 0
     fi
-    local stale
-    stale="$(server_pid "$SERVER")"
-    [ -n "$stale" ] || stale="$(server_pid frida-server)"
-    [ -n "$stale" ] || stale="$(port_pid "$FRIDA_PORT")"
+
+    echo
+    echo "   bringing up frida-server on $DEV_SERIAL"
     if [ -n "$stale" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-      echo "   stopping an already-running frida-server so the UI launch binds cleanly ..."
+      printf '   found a running server: pid %s' "${stale:-unknown}"
+      [ -n "$holder" ] && printf ' (holding port %s)' "$FRIDA_PORT"
+      printf '\n'
+      echo "   stopping it so our own launch binds cleanly ..."
       stop_frida
       if [ -n "$(port_pid "$FRIDA_PORT")" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-        echo "   !! port $FRIDA_PORT is STILL held and could not be freed." >&2
+        echo "   !! port $FRIDA_PORT is still held and could not be freed." >&2
         echo "      On KernelSU the process is invisible to su, so it cannot be killed." >&2
-        echo "      Either drop FORCE_SERVER to reuse the running server, or:" >&2
+        if frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+          echo "      It does answer frida-ps, so continuing with THAT server instead." >&2
+          echo "      Reboot first if you need a known-clean one: adb -s $DEV_SERIAL reboot" >&2
+          echo ">> frida-server ready (pre-existing; could not be replaced)."
+          return 0
+        fi
+        echo "      It does not answer frida-ps either. Reboot and re-run:" >&2
         echo "        adb -s $DEV_SERIAL reboot" >&2
         exit 1
       fi
+      echo "   stopped; port $FRIDA_PORT is free."
+    else
+      echo "   nothing running; port $FRIDA_PORT is free."
     fi
+    echo "   launching $SERVER via MT Manager (runs with root) ..."
     ui_launch_server || { echo "!! could not launch frida-server through MT Manager." >&2; exit 1; }
 
     # --- make sure it did not error, then confirm the server via CLI ---------
