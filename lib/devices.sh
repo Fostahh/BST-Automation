@@ -35,9 +35,23 @@ android_label() {
 }
 
 # --- iOS (detection only; no scenarios implemented yet) -----------------------
-# ios_udids : "<udid>\t<name>" for each physical iOS device Xcode can reach right now.
-# The Identifier column is the udid devicectl wants for every other subcommand.
+# ios_udids : "<udid>\t<name>" for each iOS device reachable right now.
+#
+# idevice_id first. devicectl only lists a device it has CoreDevice access to, which means
+# iOS 17+; an iPhone XR on iOS 15/16 appears as an ECID row with no UDID and no State and
+# is therefore invisible to the parser below. libimobiledevice sees it over lockdown.
 ios_udids() {
+  local udid name
+  if command -v idevice_id >/dev/null 2>&1; then
+    while IFS= read -r udid; do
+      [ -n "$udid" ] || continue
+      name=""
+      command -v ideviceinfo >/dev/null 2>&1 &&
+        name="$(ideviceinfo -u "$udid" -k DeviceName 2>/dev/null | tr -d '\r')"
+      printf '%s\t%s\n' "$udid" "${name:-iOS device}"
+    done < <(idevice_id -l 2>/dev/null)
+    return 0
+  fi
   command -v xcrun >/dev/null 2>&1 || return 0
   xcrun devicectl list devices 2>/dev/null | awk '
     /^-----/ { body = 1; next }

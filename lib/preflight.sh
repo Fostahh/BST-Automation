@@ -38,6 +38,21 @@ _pf_tool() {
   return 1
 }
 
+# iOS tooling. devicectl ships with Xcode but only drives iOS 17+; the lockdown tools
+# cover the iOS 15/16 devices a jailbreak implies. Without either, the iOS cases still run
+# as gated manual flows, they just cannot verify their own steps.
+_pf_ios() {
+  if command -v ideviceinstaller >/dev/null 2>&1 && command -v ideviceinfo >/dev/null 2>&1; then
+    _pf_row "ios tooling" "ok (libimobiledevice — covers iOS 15/16 and up)"
+  elif command -v xcrun >/dev/null 2>&1; then
+    _pf_row "ios tooling" "devicectl only — cannot read apps on iOS < 17"
+    echo "    for a jailbroken iOS 15/16 device (iPhone XR and the like):" >&2
+    echo "      brew install libimobiledevice ideviceinstaller" >&2
+  else
+    _pf_row "ios tooling" "none — iOS cases run unverified"
+  fi
+}
+
 # Report what is on the cable. There is nothing to configure, so this is informational
 # except when there is no device at all, which rules out every scenario but 8.
 _pf_devices() {
@@ -125,6 +140,7 @@ preflight() {
   _pf_uiautomator2
   _pf_venv
   _pf_devices
+  _pf_ios
   [ -n "${HOOK_DIR:-}" ] && _pf_row "HOOK_DIR" "$HOOK_DIR" \
     || _pf_row "HOOK_DIR" "unset — case 4 looks for a .js hooks folder next to itself"
   if [ "$missing" != 0 ]; then

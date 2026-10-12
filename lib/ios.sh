@@ -24,10 +24,39 @@ IOS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
 
 # --- talking to the device ----------------------------------------------------
-# devicectl writes structured output to a file rather than stdout, which is the only
-# format worth parsing — the human table is columns of padded text that shift with the
-# longest device name on the machine.
-_dc_json() {   # _dc_json <subcommand...> : echo the JSON devicectl produced, or rc1
+# TWO BACKENDS, because one tool does not cover the devices these cases run on.
+#
+# xcrun devicectl is the iOS 17+ CoreDevice interface. Asking it to list apps on an
+# iPhone XR running iOS 15/16 — which is what a Dopamine jailbreak implies — fails with
+#   com.apple.dt.CoreDeviceError 1014: This device does not support acquiring a usage
+#   assertion
+# It can still read hardware properties over the restore layer, which is why the device
+# shows up in `devicectl list devices` at all, as an ECID row with no UDID and no State.
+#
+# libimobiledevice speaks the lockdown protocol those devices do support, so it is
+# preferred when present. devicectl is the fallback for an iOS 17+ device.
+#
+#   brew install libimobiledevice ideviceinstaller
+#
+# Every operation goes through one of these two, resolved once. A backend of "none" is not
+# fatal: the cases are gated manual flows and still run, they just lose the verification
+# between the steps, and each one says so rather than quietly skipping the check.
+IOS_BACKEND="${IOS_BACKEND:-}"
+ios_backend() {
+  [ -n "$IOS_BACKEND" ] && { printf '%s' "$IOS_BACKEND"; return 0; }
+  if command -v ideviceinstaller >/dev/null 2>&1 && command -v ideviceinfo >/dev/null 2>&1; then
+    IOS_BACKEND=imd
+  elif command -v xcrun >/dev/null 2>&1; then
+    IOS_BACKEND=devicectl
+  else
+    IOS_BACKEND=none
+  fi
+  printf '%s' "$IOS_BACKEND"
+}
+
+DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
+
+_dc_json() {   # devicectl writes structured output to a file; the human table is padded columns
   local out rc=0
   out="$(mktemp "${TMPDIR:-/tmp}/bst-dc.XXXXXX.json")" || return 1
   if ! xcrun devicectl "$@" --device "$DEV_SERIAL" --json-output "$out" \
@@ -39,16 +68,29 @@ _dc_json() {   # _dc_json <subcommand...> : echo the JSON devicectl produced, or
   return "$rc"
 }
 
-# ios_apps : "<bundleid>\t<version>" per installed app.
-# Parsed in python, not with grep: an unexpected shape must be an error, not a silent
-# empty list that every caller then reads as "the app is not installed".
+# ios_apps : "<bundleid>\t<version>" per installed app, or rc1 if it could not be read.
+# An unreadable inventory must NOT come back as an empty list — every caller would read
+# that as "the app is not installed" and act on it.
 ios_apps() {
-  _dc_json device info apps | python3 -I -c '
+  case "$(ios_backend)" in
+    imd)
+      ideviceinstaller --udid "$DEV_SERIAL" list --user 2>/dev/null \
+        | awk -F', ' 'NR>1 && NF>=2 {
+            id=$1; ver=$2; gsub(/^"|"$/, "", id); gsub(/^"|"$/, "", ver)
+            if (id != "") printf "%s\t%s\n", id, ver
+          }' | grep . || return 1
+      ;;
+    devicectl)
+      _dc_json device info apps | python3 -I -c '
 import json, sys
 try:
     doc = json.load(sys.stdin)
 except (json.JSONDecodeError, ValueError) as error:
     sys.exit(f"ios_apps: devicectl did not return JSON ({error})")
+if "error" in doc:
+    info = doc["error"].get("userInfo", {}).get("NSLocalizedDescription", {})
+    why = info.get("string") if isinstance(info, dict) else info
+    sys.exit(f"ios_apps: devicectl refused: {why or doc[chr(34)]+chr(34)}")
 apps = doc.get("result", {}).get("apps")
 if apps is None:
     sys.exit("ios_apps: no result.apps in the devicectl output; its schema changed")
@@ -58,20 +100,51 @@ for app in apps:
     if bundle:
         print(f"{bundle}\t{version}")
 '
+      ;;
+    *) return 1 ;;
+  esac
 }
 
-ios_installed() {   # exit 0 if <bundleid> is installed
-  ios_apps 2>/dev/null | awk -F'\t' -v b="$1" '$1==b{f=1} END{exit f?0:1}'
+# ios_can_verify : true when the inventory is actually readable on this device.
+# Checked once per case so a flow can say "running without verification" up front rather
+# than reporting a cheerful but meaningless result at every step.
+IOS_VERIFY=""
+ios_can_verify() {
+  if [ -z "$IOS_VERIFY" ]; then
+    if ios_apps >/dev/null 2>&1; then IOS_VERIFY=1; else IOS_VERIFY=0; fi
+  fi
+  [ "$IOS_VERIFY" = 1 ]
 }
 
-ios_version() {     # echo the installed version of <bundleid>, empty if absent
+ios_installed() {   # exit 0 if <bundleid> is installed; rc2 means "could not tell"
+  local apps
+  apps="$(ios_apps 2>/dev/null)" || return 2
+  printf '%s\n' "$apps" | awk -F'\t' -v b="$1" '$1==b{f=1} END{exit f?0:1}'
+}
+
+ios_version() {     # echo the installed version of <bundleid>, empty if absent or unknown
   ios_apps 2>/dev/null | awk -F'\t' -v b="$1" '$1==b{print $2; exit}'
 }
 
-ios_uninstall() {   # remove <bundleid>; succeeds quietly when it was not there
+ios_os_version() {  # the iOS version, for the opening report. Empty when unreadable.
+  case "$(ios_backend)" in
+    imd) ideviceinfo --udid "$DEV_SERIAL" -k ProductVersion 2>/dev/null | tr -d '\r' ;;
+    *)   : ;;
+  esac
+}
+
+ios_uninstall() {   # remove <bundleid>; quiet success when it was not there
   echo "   uninstalling $1 ..."
-  if ! ios_installed "$1"; then echo "   not installed — nothing to remove."; return 0; fi
-  _dc_json device uninstall app "$1" >/dev/null || true
+  case "$(ios_installed "$1"; echo $?)" in
+    1) echo "   not installed — nothing to remove."; return 0 ;;
+    2) echo "   cannot read the app list, so cannot confirm what is installed." >&2
+       gate "remove $1 BY HAND in Settings, then continue?"
+       return 0 ;;
+  esac
+  case "$(ios_backend)" in
+    imd)       ideviceinstaller --udid "$DEV_SERIAL" uninstall "$1" >/dev/null 2>&1 || true ;;
+    devicectl) _dc_json device uninstall app "$1" >/dev/null 2>&1 || true ;;
+  esac
   if ios_installed "$1"; then
     echo "!! $1 is still installed after the uninstall request." >&2
     return 1
@@ -79,8 +152,11 @@ ios_uninstall() {   # remove <bundleid>; succeeds quietly when it was not there
   echo "   removed."
 }
 
-ios_launch() {      # bring <bundleid> to the foreground
-  _dc_json device process launch --terminate-existing "$1" >/dev/null 2>&1 || true
+ios_launch() {      # best effort; the operator can always tap the icon
+  case "$(ios_backend)" in
+    imd)       idevicedebug --udid "$DEV_SERIAL" run "$1" >/dev/null 2>&1 & disown || true ;;
+    devicectl) _dc_json device process launch --terminate-existing "$1" >/dev/null 2>&1 || true ;;
+  esac
 }
 
 # --- talking to the operator ---------------------------------------------------
@@ -125,7 +201,25 @@ await() {
 # TestFlight is not holding a newer one. Running a scenario against a stale build makes
 # the verdict describe the wrong binary.
 ios_general_rules() {
-  local pkg="$1" before
+  local pkg="$1" before after os backend
+  backend="$(ios_backend)"
+  os="$(ios_os_version)"
+  printf '  device:  %s%s\n' "${DEV_NAME:-$DEV_SERIAL}" "${os:+  (iOS $os)}"
+  printf '  verify:  '
+  if ios_can_verify; then
+    printf 'via %s — app inventory readable\n' "$backend"
+  else
+    printf 'UNAVAILABLE'
+    case "$backend" in
+      none)      printf ' (no device tooling installed)\n' ;;
+      devicectl) printf ' (devicectl cannot read apps on iOS < 17)\n' ;;
+      *)         printf ' (%s could not read the app list)\n' "$backend" ;;
+    esac
+    echo "           install libimobiledevice to get it back:" >&2
+    echo "             brew install libimobiledevice ideviceinstaller" >&2
+    echo "           the case still runs; it just cannot check its own steps." >&2
+  fi
+
   step "Settings > General > About — confirm the device and iOS version"
   gate "done?"
 
@@ -134,12 +228,19 @@ ios_general_rules() {
   gate "done?"
 
   before="$(ios_version "$pkg")"
-  detail "installed version right now: ${before:-not installed}"
+  ios_can_verify && detail "installed version right now: ${before:-not installed}"
+
   step "If that build shows an UPDATE button, tap it and let it finish"
   detail "the case must not continue against the old build"
   gate "is the build installed and up to date?"
 
-  local after; after="$(ios_version "$pkg")"
+  # Only draw conclusions from the inventory when the inventory is actually readable.
+  # Treating an unreadable one as "not installed" would stop every case on this device.
+  if ! ios_can_verify; then
+    detail "cannot confirm the version from here — trusting your answer above"
+    return 0
+  fi
+  after="$(ios_version "$pkg")"
   if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
     detail "version changed: $before -> $after"
   elif [ -n "$after" ]; then
