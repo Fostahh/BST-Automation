@@ -186,6 +186,30 @@ port_pid() {     # PID holding local TCP port $1 (empty if nothing/unknown)
              -e 's#.*pid=\([0-9]\{1,\}\).*#\1#p' | head -1 || true
 }
 
+# server_running : is a frida-server ACTUALLY up on the device?
+#
+# frida-ps is not evidence of one. frida-tools can drive a JAILED (unrooted) Android
+# device straight over adb, so `frida-ps -D <serial>` returns 0 with no server running at
+# all. Treating that as "a server is answering" skipped the launch, reported a server it
+# could not find a pid for, tried to free a port nothing held, and left `frida -f` to die
+# with "need Gadget to attach on jailed Android" — on a perfectly rooted phone.
+# The process table and the listening port are the only honest signals.
+server_running() {
+  [ -n "$(server_pid frida-server)" ] || [ -n "$(port_pid "$FRIDA_PORT")" ]
+}
+
+# root_flavour : what kind of su this device has, for diagnostics that name it correctly.
+root_flavour() {
+  local ctx
+  ctx="$(adbx shell 'su -c id' 2>/dev/null | tr -d '\r')"
+  case "$ctx" in
+    '')             printf 'no working su' ;;
+    *magisk*)       printf 'Magisk' ;;
+    *ksu*|*kernelsu*) printf 'KernelSU' ;;
+    *)              printf 'rooted (unrecognised su context)' ;;
+  esac
+}
+
 stop_frida() {   # clear every frida-server on the device, whatever it is called
   adbx shell "su -c 'pkill -9 -f \"[f]rida-server\"'" >/dev/null 2>&1 || true
   local p
@@ -297,36 +321,37 @@ bring_up_server() {
     holder="$(port_pid "$FRIDA_PORT")"
     [ -n "$stale" ] || stale="$holder"
 
-    if [ "${FORCE_SERVER:-1}" = 0 ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-      echo "   FORCE_SERVER=0 — reusing the frida-server already answering on $DEV_SERIAL."
+    if [ "${FORCE_SERVER:-1}" = 0 ] && server_running; then
+      echo "   FORCE_SERVER=0 — reusing the frida-server already running on $DEV_SERIAL."
       echo ">> frida-server ready (reused)."
       return 0
     fi
 
     echo
     echo "   bringing up frida-server on $DEV_SERIAL"
-    if [ -n "$stale" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+    echo "   root: $(root_flavour)"
+    if server_running; then
       printf '   found a running server: pid %s' "${stale:-unknown}"
       [ -n "$holder" ] && printf ' (holding port %s)' "$FRIDA_PORT"
       printf '\n'
       echo "   stopping it so our own launch binds cleanly ..."
       stop_frida
-      if [ -n "$(port_pid "$FRIDA_PORT")" ] || frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-        echo "   !! port $FRIDA_PORT is still held and could not be freed." >&2
-        echo "      On KernelSU the process is invisible to su, so it cannot be killed." >&2
-        if frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-          echo "      It does answer frida-ps, so continuing with THAT server instead." >&2
-          echo "      Reboot first if you need a known-clean one: adb -s $DEV_SERIAL reboot" >&2
-          echo ">> frida-server ready (pre-existing; could not be replaced)."
-          return 0
-        fi
-        echo "      It does not answer frida-ps either. Reboot and re-run:" >&2
+      if server_running; then
+        # Real evidence this time: a pid in the process table, or something on the port.
+        local left_pid left_port
+        left_pid="$(server_pid frida-server)"
+        left_port="$(port_pid "$FRIDA_PORT")"
+        echo "   !! a frida-server is still there after the stop attempt." >&2
+        printf '      process pid=%s   port %s held by pid=%s\n' \
+          "${left_pid:-none}" "$FRIDA_PORT" "${left_port:-none}" >&2
+        echo "      Some root managers keep one alive outside su's reach. Reboot and re-run:" >&2
         echo "        adb -s $DEV_SERIAL reboot" >&2
+        echo "      Or set FORCE_SERVER=0 to use whatever is already there." >&2
         exit 1
       fi
       echo "   stopped; port $FRIDA_PORT is free."
     else
-      echo "   nothing running; port $FRIDA_PORT is free."
+      echo "   no frida-server running; port $FRIDA_PORT is free."
     fi
     echo "   launching $SERVER via MT Manager (runs with root) ..."
     ui_launch_server || { echo "!! could not launch frida-server through MT Manager." >&2; exit 1; }
@@ -367,13 +392,16 @@ bring_up_server() {
   else
     # headless fallback: optional visual aid + background start over adb
     [ "${OPEN_MT:-1}" = "1" ] && open_mt_manager || true
-    if frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || [ -n "$(server_pid "$SERVER")" ]; then
+    if server_running; then
       echo "   a frida-server is already running — reusing it."
     else
       su_sh "chmod 755 $(shq "$SERVER_DIR/$SERVER"); setsid $(shq "$SERVER_DIR/$SERVER") >/dev/null 2>&1 &" || true
       nap 2
     fi
-    frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || { echo "!! frida-server did not come up (frida-ps failed)." >&2; exit 1; }
+    # Both signals: the process must exist AND the host must be able to talk to it.
+    # frida-ps alone would pass on a jailed device with nothing running.
+    server_running || { echo "!! frida-server did not come up (no process, nothing on port $FRIDA_PORT)." >&2; exit 1; }
+    frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || { echo "!! frida-server is up but the host cannot reach it." >&2; exit 1; }
     echo ">> frida-server ($FRIDA_VER) runs."
   fi
 }
@@ -446,8 +474,9 @@ rm -f "$UI_XML"
 while :; do
   run_hook
   hook_again || break
-  if ! frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-    echo "   frida-server is no longer reachable — re-run Case 4 to bring it back up." >&2
+  if ! server_running; then
+    echo "   frida-server is gone — re-run Case 4 to bring it back up." >&2
+    echo "   (without it frida falls back to jailed mode, which cannot spawn.)" >&2
     break
   fi
 done
