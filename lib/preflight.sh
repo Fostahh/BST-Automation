@@ -38,18 +38,66 @@ _pf_tool() {
   return 1
 }
 
-# iOS tooling. devicectl ships with Xcode but only drives iOS 17+; the lockdown tools
-# cover the iOS 15/16 devices a jailbreak implies. Without either, the iOS cases still run
-# as gated manual flows, they just cannot verify their own steps.
+# _pf_ios_attached : is an iPhone/iPad on the USB bus at all?
+#
+# ioreg, not devicectl or idevice_id: it sees the hardware regardless of pairing, trust,
+# developer mode or iOS version. That matters here — the iPhone XR these cases target is
+# invisible to devicectl's device list (it shows only as an ECID row) yet ioreg reports it
+# as an active IOUSBHostDevice. Used to decide whether the install offer below is relevant
+# at all, so an Android-only run is never asked about iOS tooling.
+_pf_ios_attached() {
+  ioreg -p IOUSB -w 0 2>/dev/null | grep -qiE 'iPhone|iPad'
+}
+
+# iOS tooling. devicectl ships with Xcode but is the iOS 17+ CoreDevice interface and
+# cannot read the app inventory on anything older — a jailbroken iOS 15/16 device answers
+# CoreDeviceError 1014. libimobiledevice speaks the lockdown protocol those devices do
+# support. Without either, the iOS cases still run as gated manual flows; they just cannot
+# verify their own steps, which is the whole reason they are scripted.
 _pf_ios() {
   if command -v ideviceinstaller >/dev/null 2>&1 && command -v ideviceinfo >/dev/null 2>&1; then
     _pf_row "ios tooling" "ok (libimobiledevice — covers iOS 15/16 and up)"
-  elif command -v xcrun >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v xcrun >/dev/null 2>&1; then
     _pf_row "ios tooling" "devicectl only — cannot read apps on iOS < 17"
-    echo "    for a jailbroken iOS 15/16 device (iPhone XR and the like):" >&2
-    echo "      brew install libimobiledevice ideviceinstaller" >&2
   else
-    _pf_row "ios tooling" "none — iOS cases run unverified"
+    _pf_row "ios tooling" "none — iOS cases would run unverified"
+  fi
+
+  # Only offer when it is actually relevant. The row above is free information; a prompt
+  # in front of every Android run would not be.
+  _pf_ios_attached || {
+    echo "    (no iPhone/iPad on USB — install it when you need the iOS cases:" >&2
+    echo "     brew install libimobiledevice ideviceinstaller)" >&2
+    return 0
+  }
+  echo "    an iPhone/iPad is attached, so the iOS cases would run without verification."
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "    !! Homebrew not found, so this cannot be installed for you. Either install" >&2
+    echo "       Homebrew, or get libimobiledevice + ideviceinstaller another way." >&2
+    return 0
+  fi
+  local ans="${ASSUME_YES:-}"
+  if [ -z "$ans" ]; then
+    read -rp "    install libimobiledevice + ideviceinstaller via Homebrew now? [Y/n]: " ans || ans=""
+  fi
+  case "$ans" in n|N) echo "    skipped — iOS cases will run without verification."; return 0;; esac
+
+  # Unlike the uiautomator2 install this is not a private venv: brew writes into its own
+  # prefix, system-wide. Hence the prompt, and hence saying so rather than just doing it.
+  echo "    brew install libimobiledevice ideviceinstaller  (a minute or two) ..."
+  if brew install libimobiledevice ideviceinstaller; then
+    if command -v ideviceinstaller >/dev/null 2>&1 && command -v ideviceinfo >/dev/null 2>&1; then
+      _pf_row "ios tooling" "installed (libimobiledevice)"
+      echo "    tap \"Trust This Computer\" on the device if it asks — nothing has paired"
+      echo "    with it over lockdown yet, and idevice_id -l stays empty until you do."
+    else
+      echo "    !! brew reported success but ideviceinstaller is not on PATH." >&2
+    fi
+  else
+    echo "    !! install failed — iOS cases will run without verification." >&2
   fi
 }
 
