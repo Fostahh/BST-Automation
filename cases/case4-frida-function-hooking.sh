@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # NAME: Case 4 — Frida Function Hooking
 # Bring up a version-matched frida-server on the device, then run a hook script
-# from fridaenv/Hooking against the target package — as many passes as you like:
-# after each detach it offers to replay the same hook without restarting the server.
+# against the target package — as many passes as you like: after each detach it offers to
+# replay the same hook without restarting the server.
+#
+# The server is ALWAYS started by hand through MT Manager's Script executor. That is the
+# flow, not an option in it: the scenario has to be able to say which binary is
+# instrumenting the app, and it only knows that by having started the version-matched one
+# itself, with root, through the same UI a tester would use. If a server is already
+# running it is stopped first, then launched the same way. There is no reuse path and no
+# headless `adb shell` path — a server of unknown provenance makes the verdict
+# meaningless, and a shortcut over adb can leave artefacts the app under test may notice.
+#
 #   Uses DEV_SERIAL + TARGET_PKG exported by run-scenarios.sh.
 #   env: USE_VENV=1|0   SERVER_DIR=<dir>   MODE=spawn|attach
-#        UI_EXEC=1|0    1 = start the server by hand via MT Manager's Script executor
-#                       0 = start it headless over adb (setsid)
-#        OPEN_MT=1|0    launch MT Manager as a visual aid in the headless path
-#        FORCE_SERVER=0 reuse a server that is already answering instead of restarting
-#                       it. Default is 1: stop whatever holds the port, then relaunch.
 #        MT_PKG=<pkg>   MT Manager package (default bin.mt.plus, via lib/mtmanager.sh)
+#        FRIDA_PORT=<n> the port the stale-server checks key off (default 27042)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../lib/common.sh"                      # adbx(), inp(), launch(), focus_now(), swipr(), detect_size()
@@ -304,105 +309,80 @@ bring_up_server() {
   fi
   echo "4) matched device server: $SERVER  (abi=$abi)"
 
-  if [ "${UI_EXEC:-1}" = "1" ]; then
-    detect_size                                      # swipr/ratio taps need the screen size
-    # A server may already be running: from an earlier run, a boot script, or a root
-    # manager that keeps one up. On Magisk the port holder is visible and killable, so the
-    # default is to STOP it and launch our own — reusing a server of unknown provenance
-    # means the scenario no longer controls what is instrumenting the app.
-    #
-    # KernelSU is the exception the old default was built around: there the su domain is
-    # blind to the process table (ps/lsof/proc all come back empty), so stop_frida cannot
-    # kill what it cannot see. That is handled below by falling back to the server that is
-    # already answering, rather than ending the case. FORCE_SERVER=0 skips the restart.
-    local stale holder
-    stale="$(server_pid "$SERVER")"
-    [ -n "$stale" ] || stale="$(server_pid frida-server)"
-    holder="$(port_pid "$FRIDA_PORT")"
-    [ -n "$stale" ] || stale="$holder"
+  local stale holder
+  stale="$(server_pid "$SERVER")"
+  [ -n "$stale" ] || stale="$(server_pid frida-server)"
+  holder="$(port_pid "$FRIDA_PORT")"
+  [ -n "$stale" ] || stale="$holder"
 
-    if [ "${FORCE_SERVER:-1}" = 0 ] && server_running; then
-      echo "   FORCE_SERVER=0 — reusing the frida-server already running on $DEV_SERIAL."
-      echo ">> frida-server ready (reused)."
-      return 0
-    fi
+  detect_size                                        # swipr/ratio taps need the screen size
 
-    echo
-    echo "   bringing up frida-server on $DEV_SERIAL"
-    echo "   root: $(root_flavour)"
+  # Launching through MT Manager's Script executor is the flow, not a branch of it. The
+  # scenario has to be able to say WHICH binary is instrumenting the app, and the only
+  # way it knows that is by having started the version-matched server itself, with root,
+  # through the same UI a tester would use. So: stop whatever is there, then launch.
+  #
+  # There is deliberately no reuse option and no headless path any more. Reusing a server
+  # of unknown provenance makes the verdict meaningless, and starting one over `adb shell`
+  # is a shortcut whose artefacts the app under test could tell apart from the real thing.
+  echo
+  echo "5) frida-server on $DEV_SERIAL  (root: $(root_flavour))"
+  if server_running; then
+    printf '   already running: pid %s' "${stale:-unknown}"
+    [ -n "$holder" ] && printf ' (holding port %s)' "$FRIDA_PORT"
+    printf '\n'
+    echo "   stopping it first ..."
+    stop_frida
     if server_running; then
-      printf '   found a running server: pid %s' "${stale:-unknown}"
-      [ -n "$holder" ] && printf ' (holding port %s)' "$FRIDA_PORT"
-      printf '\n'
-      echo "   stopping it so our own launch binds cleanly ..."
-      stop_frida
-      if server_running; then
-        # Real evidence this time: a pid in the process table, or something on the port.
-        local left_pid left_port
-        left_pid="$(server_pid frida-server)"
-        left_port="$(port_pid "$FRIDA_PORT")"
-        echo "   !! a frida-server is still there after the stop attempt." >&2
-        printf '      process pid=%s   port %s held by pid=%s\n' \
-          "${left_pid:-none}" "$FRIDA_PORT" "${left_port:-none}" >&2
-        echo "      Some root managers keep one alive outside su's reach. Reboot and re-run:" >&2
-        echo "        adb -s $DEV_SERIAL reboot" >&2
-        echo "      Or set FORCE_SERVER=0 to use whatever is already there." >&2
-        exit 1
-      fi
-      echo "   stopped; port $FRIDA_PORT is free."
-    else
-      echo "   no frida-server running; port $FRIDA_PORT is free."
-    fi
-    echo "   launching $SERVER via MT Manager (runs with root) ..."
-    ui_launch_server || { echo "!! could not launch frida-server through MT Manager." >&2; exit 1; }
-
-    # --- make sure it did not error, then confirm the server via CLI ---------
-    # The MT terminal renders in a view uiautomator can't read, so the decisive
-    # check is the process + host CLI: a server that errored simply isn't there.
-    # Poll rather than guess with one sleep: on a slower device the server can take
-    # several seconds to bind after EXECUTE.
-    local pid="" i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      sleep 1
-      pid="$(server_pid "$SERVER")"
-      [ -n "$pid" ] && break
-    done
-    if [ -n "$pid" ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
-      echo ">> no error. CLI check: targeted server '$SERVER' is RUNNING (pid $pid), reachable via frida-ps."
-    else
-      echo "!! frida-server errored — it is not running after EXECUTE." >&2
-      echo "   what happened (captured by running it once on the device):" >&2
-      local diag
-      # $SERVER comes from a device directory listing, so it must be quoted: it reaches
-      # a root shell, where a crafted filename would otherwise run as a command.
-      diag="$(su_sh "timeout 3 $(shq "$SERVER_DIR/$SERVER") 2>&1 | head -5" 2>/dev/null | tr -d '\r' || true)"
-      [ -n "$diag" ] && printf '%s\n' "$diag" | sed 's/^/     /' >&2
-      local scr; scr="$(terminal_error)"; [ -n "$scr" ] && printf '     %s\n' "$scr" >&2
-      case "$diag$scr" in
-        *"already in use"*)
-          echo "   something else holds frida's port $FRIDA_PORT. Clear it with:"      >&2
-          echo "     adb -s $DEV_SERIAL shell \"su -c 'pkill -9 -f frida'\""           >&2
-          echo "     adb -s $DEV_SERIAL shell \"su -c 'am force-stop $MT_PKG'\""       >&2
-          echo "   then re-run Case 4 (or reboot the device if it comes back)."        >&2
-          ;;
-      esac
-      echo ">> finishing: fix the error above, then re-run Case 4." >&2
+      local left_pid left_port
+      left_pid="$(server_pid frida-server)"
+      left_port="$(port_pid "$FRIDA_PORT")"
+      echo "   !! it is still there after the stop attempt." >&2
+      printf '      process pid=%s   port %s held by pid=%s\n' \
+        "${left_pid:-none}" "$FRIDA_PORT" "${left_port:-none}" >&2
+      echo "      Some root managers keep one alive outside the reach of su." >&2
+      echo "      Reboot and re-run:  adb -s $DEV_SERIAL reboot" >&2
       exit 1
     fi
+    echo "   stopped; port $FRIDA_PORT is free."
   else
-    # headless fallback: optional visual aid + background start over adb
-    [ "${OPEN_MT:-1}" = "1" ] && open_mt_manager || true
-    if server_running; then
-      echo "   a frida-server is already running — reusing it."
-    else
-      su_sh "chmod 755 $(shq "$SERVER_DIR/$SERVER"); setsid $(shq "$SERVER_DIR/$SERVER") >/dev/null 2>&1 &" || true
-      nap 2
-    fi
-    # Both signals: the process must exist AND the host must be able to talk to it.
-    # frida-ps alone would pass on a jailed device with nothing running.
-    server_running || { echo "!! frida-server did not come up (no process, nothing on port $FRIDA_PORT)." >&2; exit 1; }
-    frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1 || { echo "!! frida-server is up but the host cannot reach it." >&2; exit 1; }
-    echo ">> frida-server ($FRIDA_VER) runs."
+    echo "   not running; port $FRIDA_PORT is free."
+  fi
+
+  ui_launch_server || { echo "!! could not launch frida-server through MT Manager." >&2; exit 1; }
+
+  # --- make sure it did not error, then confirm the server via CLI ---------
+  # The MT terminal renders in a view uiautomator can't read, so the decisive
+  # check is the process + host CLI: a server that errored simply isn't there.
+  # Poll rather than guess with one sleep: on a slower device the server can take
+  # several seconds to bind after EXECUTE.
+  local pid="" i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    pid="$(server_pid "$SERVER")"
+    [ -n "$pid" ] && break
+  done
+  if [ -n "$pid" ] && frida-ps -D "$DEV_SERIAL" >/dev/null 2>&1; then
+    echo ">> no error. CLI check: targeted server '$SERVER' is RUNNING (pid $pid), reachable via frida-ps."
+  else
+    echo "!! frida-server errored — it is not running after EXECUTE." >&2
+    echo "   what happened (captured by running it once on the device):" >&2
+    local diag
+    # $SERVER comes from a device directory listing, so it must be quoted: it reaches
+    # a root shell, where a crafted filename would otherwise run as a command.
+    diag="$(su_sh "timeout 3 $(shq "$SERVER_DIR/$SERVER") 2>&1 | head -5" 2>/dev/null | tr -d '\r' || true)"
+    [ -n "$diag" ] && printf '%s\n' "$diag" | sed 's/^/     /' >&2
+    local scr; scr="$(terminal_error)"; [ -n "$scr" ] && printf '     %s\n' "$scr" >&2
+    case "$diag$scr" in
+      *"already in use"*)
+        echo "   something else holds frida's port $FRIDA_PORT. Clear it with:"      >&2
+        echo "     adb -s $DEV_SERIAL shell \"su -c 'pkill -9 -f frida'\""           >&2
+        echo "     adb -s $DEV_SERIAL shell \"su -c 'am force-stop $MT_PKG'\""       >&2
+        echo "   then re-run Case 4 (or reboot the device if it comes back)."        >&2
+        ;;
+    esac
+    echo ">> finishing: fix the error above, then re-run Case 4." >&2
+    exit 1
   fi
 }
 
