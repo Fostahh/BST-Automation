@@ -57,15 +57,31 @@ def choose(items, prompt):
 
 
 def source_mode():
+    """"auto" or "manual", asked exactly the way case 5 asks it.
+
+    Both cases choose between the same two things, so they use the same prompt rather than
+    one offering a numbered menu and the other A/m. Enter takes the default (auto), and an
+    unrecognised answer is asked again instead of silently falling through to auto — a
+    typo should not start pulling a 100 MB+ APK off the phone."""
     if os.environ.get("APK"):
         return "manual"
-    mode = os.environ.get("APK_SOURCE", "").lower()
+    mode = os.environ.get("APK_SOURCE", "").strip().lower()
     if mode:
         if mode not in ("manual", "auto"):
             raise RuntimeError("APK_SOURCE must be manual or auto.")
         return mode
-    return {"Manual": "manual", "Automatic": "auto"}[
-        choose(["Manual", "Automatic"], "APK/APKS source: ")]
+    while True:
+        try:
+            answer = input("3) APK source — [A]uto-extract via MT Manager, "
+                           "or [m]anual local path? [A/m]: ").strip().lower()
+        except EOFError:
+            print()
+            raise RuntimeError("No APK source chosen.")
+        if answer in ("", "a", "auto"):
+            return "auto"
+        if answer in ("m", "manual"):
+            return "manual"
+        print("   answer A or m.")
 
 
 def find_emulator():

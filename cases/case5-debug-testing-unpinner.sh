@@ -93,9 +93,18 @@ echo "   using: $UNPINNER_CMD"
 APK="$(unquote "${APK:-}")"
 SRC="${APK_SOURCE:-}"
 [ -n "$APK" ] && SRC=manual
-if [ -z "$SRC" ]; then
-  read -rp "3) APK source — [A]uto-extract via MT Manager, or [m]anual local path? [A/m]: " SRC
-fi
+# Enter takes the default (auto). An unrecognised answer is asked again rather than
+# falling through to auto, so a typo cannot start pulling a 100 MB+ APK off the phone.
+# Case 8 asks this the same way; keep the two in step.
+while [ -z "$SRC" ]; do
+  read -rp "3) APK source — [A]uto-extract via MT Manager, or [m]anual local path? [A/m]: " SRC \
+    || { echo; echo "!! no APK source chosen." >&2; exit 1; }
+  case "$SRC" in
+    ''|a|A|auto|Auto)     SRC=auto ;;
+    m|M|manual|Manual)    SRC=manual ;;
+    *) echo "   answer A or m." >&2; SRC="" ;;
+  esac
+done
 case "$SRC" in
   m|M|manual|Manual)
     if [ -z "$APK" ]; then read -rp "   path to the APK (.apk): " APK; APK="$(unquote "$APK")"; fi
