@@ -19,13 +19,18 @@ android_serials() {
   adb devices 2>/dev/null | tr -d '\r' | awk '$2=="device"{print $1}'
 }
 
-# android_label <serial> : a human line for the menu — model and release if adb will say.
+# android_label <serial> : a human line for the menu — model and release if adb will say,
+# and an explicit tag for an emulator so one left running by case 8 is obvious in the list.
+#
+# </dev/null on every adb call. `adb shell` forwards stdin to the device, so calling this
+# from inside a `while read` loop lets it swallow the lines the loop has not read yet:
+# a two-device list printed one row while the header correctly said "2 attached".
 android_label() {
-  local model release
-  model="$(adb -s "$1" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
-  release="$(adb -s "$1" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')"
-  case "$1" in emulator-*) model="${model:-emulator}" ;; esac
-  printf '%s' "${model:-unknown model}${release:+, Android $release}"
+  local model release tag=""
+  model="$(adb -s "$1" shell getprop ro.product.model </dev/null 2>/dev/null | tr -d '\r')"
+  release="$(adb -s "$1" shell getprop ro.build.version.release </dev/null 2>/dev/null | tr -d '\r')"
+  case "$1" in emulator-*) tag="  [emulator]" ;; esac
+  printf '%s%s' "${model:-unknown model}${release:+, Android $release}" "$tag"
 }
 
 # --- iOS (detection only; no scenarios implemented yet) -----------------------
@@ -87,13 +92,19 @@ pick_device() {
   fi
 
   echo "== Device — $count attached, choose one =="
+  # Collect first, print second. The collecting loop is fed from stdin, so nothing inside
+  # it may read stdin; android_label does (via adb shell) and used to eat the rest of the
+  # list. Printing happens afterwards, where stdin is nobody's business.
   i=0
   DEVICE_LIST=()
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     i=$((i + 1)); DEVICE_LIST[$i]="$s"
-    printf '  %d) %-22s %s\n' "$i" "$s" "$(android_label "$s")"
   done <<< "$serials"
+  local n
+  for (( n=1; n<=i; n++ )); do
+    printf '  %d) %-22s %s\n' "$n" "${DEVICE_LIST[$n]}" "$(android_label "${DEVICE_LIST[$n]}")"
+  done
   echo
   while :; do
     read -rp "device number: " answer || { echo "no device chosen." >&2; return 1; }
