@@ -6,10 +6,11 @@
 # lists them and asks. Nothing about a device is written to disk — no serials, no PINs,
 # no names — so there is nothing here to keep out of the repo.
 #
-# Platform comes from the same place: adb only ever sees Android, so any attached device
-# means Android. iOS is looked for ONLY when no Android device is found, purely to give a
-# useful message — a paired iPhone sitting in Xcode's device list must not start asking
-# questions during an Android run.
+# Platform comes from the same place. adb only ever sees Android and devicectl only ever
+# sees iOS, so whichever one answers settles it. When BOTH answer the runner asks which,
+# because that is the only genuinely ambiguous case — and it has to ask now that iOS
+# scenarios exist: the old rule of "Android wins" would make an iOS run impossible
+# whenever a phone happened to be plugged in alongside the iPhone.
 
 # --- Android ------------------------------------------------------------------
 # android_serials : attached serials in `device` state, one per line.
@@ -34,7 +35,21 @@ android_label() {
 }
 
 # --- iOS (detection only; no scenarios implemented yet) -----------------------
-# ios_devices : physical iPhones/iPads Xcode can currently reach, one "name" per line.
+# ios_udids : "<udid>\t<name>" for each physical iOS device Xcode can reach right now.
+# The Identifier column is the udid devicectl wants for every other subcommand.
+ios_udids() {
+  command -v xcrun >/dev/null 2>&1 || return 0
+  xcrun devicectl list devices 2>/dev/null | awk '
+    /^-----/ { body = 1; next }
+    body && NF && $0 ~ /physical[[:space:]]*$/ && $0 ~ /(^|[^[:alnum:]])available/ {
+      name = $0; sub(/[[:space:]][[:space:]]+.*$/, "", name)      # Name column
+      udid = ""
+      for (i = 1; i <= NF; i++) if ($i ~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]+$/) { udid = $i; break }
+      if (udid != "") printf "%s\t%s\n", udid, (name == "" ? "unnamed iOS device" : name)
+    }'
+}
+
+# ios_devices : just the names, for the "no Android device" message.
 # devicectl takes about a second and lists every device ever paired, so filter on
 # Reality=physical and a State that starts with "available". Absent Xcode is not an error.
 ios_devices() {
@@ -56,60 +71,103 @@ ios_devices() {
 
 # --- the one thing the runner calls ------------------------------------------
 # pick_device : sets DEV_SERIAL, DEV_NAME and PLATFORM.
-#   one Android device   -> selected silently
-#   several              -> listed, and the runner is asked which
-#   none, but an iPhone  -> says iOS is not implemented, leaves DEV_SERIAL empty
-#   none at all          -> leaves DEV_SERIAL empty (only case 8's manual mode can run)
-# Returns 0 even with no device: case 8 installs a local APK onto an emulator and needs
-# no phone, so an absent device is not in itself a reason to stop the run.
+#
+#   one Android device and no iPhone  -> android, selected silently
+#   one iPhone and no Android device  -> ios, selected silently
+#   several on one platform           -> listed, and the runner is asked which
+#   both platforms present            -> asked which platform, then as above
+#   none at all                       -> DEV_SERIAL empty; only Android scenario 8's
+#                                        manual mode can run without a device
+# Returns 0 even with nothing attached: case 8 installs a local APK onto an emulator, so
+# an absent device is not by itself a reason to stop the run.
 pick_device() {
-  local serials count i answer idx
-  serials="$(android_serials)"
-  count="$(printf '%s\n' "$serials" | grep -c . || true)"
+  local a_serials i_pairs a_count i_count want
+  a_serials="$(android_serials)"
+  a_count="$(printf '%s\n' "$a_serials" | grep -c . || true)"
+  i_pairs="$(ios_udids)"
+  i_count="$(printf '%s\n' "$i_pairs" | grep -c . || true)"
 
-  if [ "$count" = 0 ]; then
+  echo "== Device =="
+  if [ "$a_count" = 0 ] && [ "$i_count" = 0 ]; then
     DEV_SERIAL=""; DEV_NAME=""; PLATFORM=android
-    local ios; ios="$(ios_devices)"
-    if [ -n "$ios" ]; then
-      echo "== Device =="
-      printf '%s\n' "$ios" | sed 's/^/  iOS device found: /'
-      echo "  iOS scenarios have not been developed yet — nothing to run against it."
-    else
-      echo "== Device =="
-      echo "  No device attached."
-    fi
-    echo "  Only scenario 8 (emulator, manual APK) can run without one."
+    echo "  nothing attached."
+    echo "  Only Android scenario 8 (emulator, manual APK) can run without a device."
     return 0
   fi
 
-  PLATFORM=android          # adb sees nothing else
-  if [ "$count" = 1 ]; then
-    DEV_SERIAL="$serials"
-    DEV_NAME="$DEV_SERIAL"
-    echo "== Device =="
-    printf '  %s  (%s)\n' "$DEV_SERIAL" "$(android_label "$DEV_SERIAL")"
-    return 0
+  want=""
+  if [ "$a_count" -gt 0 ] && [ "$i_count" -gt 0 ]; then
+    # Genuinely ambiguous, so ask. Everything else is inferred.
+    printf '  Android: %s attached      iOS: %s attached\n' "$a_count" "$i_count"
+    while :; do
+      read -rp "platform — [a]ndroid or [i]os? [a/i]: " want \
+        || { echo; echo "no platform chosen." >&2; return 1; }
+      case "${want:-a}" in
+        a|A|android|Android) want=android; break ;;
+        i|I|ios|iOS|IOS)     want=ios; break ;;
+        *) echo "  answer a or i." >&2 ;;
+      esac
+    done
+  elif [ "$a_count" -gt 0 ]; then
+    want=android
+  else
+    want=ios
   fi
 
-  echo "== Device — $count attached, choose one =="
-  # Collect first, print second. The collecting loop is fed from stdin, so nothing inside
-  # it may read stdin; android_label does (via adb shell) and used to eat the rest of the
-  # list. Printing happens afterwards, where stdin is nobody's business.
-  i=0
-  DEVICE_LIST=()
+  PLATFORM="$want"
+  if [ "$want" = android ]; then
+    _pick_from "$a_serials" android
+  else
+    _pick_from "$i_pairs" ios
+  fi
+}
+
+# _pick_from <lines> <platform> : one line auto-selects, several are listed and chosen
+# between. Android lines are bare serials; iOS lines are "<udid>\t<name>".
+#
+# Collect first, print second. The collecting loop is fed from stdin, so nothing inside it
+# may read stdin — android_label does, via `adb shell`, which forwards stdin to the device
+# and used to eat the rest of the list.
+_pick_from() {
+  local lines="$1" plat="$2" i=0 n s answer idx
+  DEVICE_LIST=(); DEVICE_LABELS=()
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    i=$((i + 1)); DEVICE_LIST[$i]="$s"
-  done <<< "$serials"
-  local n
+    i=$((i + 1))
+    if [ "$plat" = ios ]; then
+      DEVICE_LIST[$i]="${s%%	*}"
+      DEVICE_LABELS[$i]="${s#*	}"
+    else
+      DEVICE_LIST[$i]="$s"
+      DEVICE_LABELS[$i]=""
+    fi
+  done <<< "$lines"
+
+  if [ "$i" = 1 ]; then
+    DEV_SERIAL="${DEVICE_LIST[1]}"
+    DEV_NAME="${DEVICE_LABELS[1]:-$DEV_SERIAL}"
+    if [ "$plat" = ios ]; then
+      printf '  %s  (%s, iOS)\n' "$DEV_NAME" "$DEV_SERIAL"
+    else
+      printf '  %s  (%s)\n' "$DEV_SERIAL" "$(android_label "$DEV_SERIAL")"
+    fi
+    return 0
+  fi
+
+  printf '  %s attached, choose one:\n' "$i"
   for (( n=1; n<=i; n++ )); do
-    printf '  %d) %-22s %s\n' "$n" "${DEVICE_LIST[$n]}" "$(android_label "${DEVICE_LIST[$n]}")"
+    if [ "$plat" = ios ]; then
+      printf '  %d) %-22s %s\n' "$n" "${DEVICE_LABELS[$n]}" "${DEVICE_LIST[$n]}"
+    else
+      printf '  %d) %-22s %s\n' "$n" "${DEVICE_LIST[$n]}" "$(android_label "${DEVICE_LIST[$n]}")"
+    fi
   done
   echo
   while :; do
     read -rp "device number: " answer || { echo "no device chosen." >&2; return 1; }
     if idx="$(pick_index "$i" "$answer")"; then
-      DEV_SERIAL="${DEVICE_LIST[$idx]}"; DEV_NAME="$DEV_SERIAL"
+      DEV_SERIAL="${DEVICE_LIST[$idx]}"
+      DEV_NAME="${DEVICE_LABELS[$idx]:-$DEV_SERIAL}"
       return 0
     fi
     echo "  choose 1-$i." >&2

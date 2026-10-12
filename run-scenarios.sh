@@ -137,9 +137,16 @@ fi
   echo "!! $(basename "$TARGET") needs a device attached; none is." >&2
   exit 1
 }
-export DEV_SERIAL DEV_NAME
-source "$HERE/lib/common.sh"
-source "$HERE/lib/device-ready.sh"
+export DEV_SERIAL DEV_NAME PLATFORM
+# Two different UI layers, because the device interfaces have nothing in common: common.sh
+# is adb and uiautomator throughout, ios.sh is devicectl and gated manual steps. Sourcing
+# the wrong one fails immediately — common.sh would try to adb a devicectl udid.
+if [ "$PLATFORM" = ios ]; then
+  source "$HERE/lib/ios.sh"
+else
+  source "$HERE/lib/common.sh"
+  source "$HERE/lib/device-ready.sh"
+fi
 
 # --- 5) target app: DenyList-checked during the scenario AND opened after it ---
 TARGET_PKG=""
@@ -168,14 +175,26 @@ while [ -z "$TARGET_PREFIX" ]; do
   [ -n "$TARGET_PREFIX" ] || echo "  a package prefix is required — it cannot be blank." >&2
 done
 export TARGET_PREFIX
-echo "== Installed target apps on $DEV_SERIAL ($TARGET_PREFIX*) =="
+echo "== Installed target apps on ${DEV_NAME:-$DEV_SERIAL} ($TARGET_PREFIX*) =="
 PACKAGES=()
 package_count=0
-# -3 lists third-party packages only, keeping the system apps out of the menu.
-if package_list="$(adbx shell pm list packages -3 --user current)"; then
+# Android: `pm list packages -3` (third-party only, so system apps stay out of the menu).
+# iOS: devicectl's app inventory, which has no equivalent of -3 — the prefix does that job.
+# `listed` separates "the device answered and nothing matched" from "the query failed",
+# which are different problems with different advice.
+listed=0
+if [ "$PLATFORM" = ios ]; then
+  if package_list="$(ios_apps 2>/dev/null)"; then
+    package_list="$(printf '%s\n' "$package_list" | cut -f1 | LC_ALL=C sort -u | grep "^$TARGET_PREFIX" || true)"
+    listed=1
+  fi
+elif package_list="$(adbx shell pm list packages -3 --user current)"; then
   # Normalize Android line endings, narrow to the namespace, keep the numbering stable.
   package_list="$(printf '%s\n' "$package_list" | tr -d '\r' | sed -n 's/^package:\([^[:space:]]*\)$/\1/p' \
                   | LC_ALL=C sort -u | grep "^$TARGET_PREFIX" || true)"
+  listed=1
+fi
+if [ "$listed" = 1 ]; then
   while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
     package_count=$((package_count + 1))
@@ -191,9 +210,9 @@ if package_list="$(adbx shell pm list packages -3 --user current)"; then
     exit 1
   fi
 else
-  # A failed listing is a different problem from an empty one — the device answered, just
-  # not usefully. The prompt below still accepts a package id typed in full.
-  echo '  WARN: could not list installed packages — enter a package id manually.' >&2
+  # A failed listing is a different problem from an empty one — the query itself did not
+  # work. The prompt below still accepts a bundle/package id typed in full.
+  echo '  WARN: could not list installed apps — enter the id manually.' >&2
 fi
 echo
 while :; do
@@ -213,19 +232,32 @@ while :; do
       ;;
   esac
 done
-if [ -n "$TARGET_PKG" ] && [ -z "$(adbx shell pm path --user current "$TARGET_PKG" 2>/dev/null)" ]; then
-  echo "WARN: '$TARGET_PKG' not found on device — will still try." >&2
+if [ -n "$TARGET_PKG" ]; then
+  if [ "$PLATFORM" = ios ]; then
+    ios_installed "$TARGET_PKG" \
+      || echo "WARN: '$TARGET_PKG' is not installed on this device — will still try." >&2
+  elif [ -z "$(adbx shell pm path --user current "$TARGET_PKG" 2>/dev/null)" ]; then
+    echo "WARN: '$TARGET_PKG' not found on device — will still try." >&2
+  fi
 fi
 export TARGET_PKG                          # case scripts use it for the DenyList check
 if [ -n "$TARGET_PKG" ]; then
-  python3 "$HERE/lib/py/app-info.py" "$DEV_SERIAL" "$TARGET_PKG" \
-    || echo 'WARN: app summary unavailable — continuing.' >&2
+  if [ "$PLATFORM" = ios ]; then
+    printf '[%s] %s\n' "$TARGET_PKG" "$(ios_version "$TARGET_PKG" || echo 'version unknown')"
+  else
+    python3 "$HERE/lib/py/app-info.py" "$DEV_SERIAL" "$TARGET_PKG" \
+      || echo 'WARN: app summary unavailable — continuing.' >&2
+  fi
 fi
 
 # --- 6) run -------------------------------------------------------------------
-ensure_device_unlocked || exit 1
+# Keyguard handling is an Android concern; iOS cases are driven by hand on an unlocked
+# phone, and there is no way to read or dismiss the iOS lock screen from here anyway.
+if [ "$PLATFORM" != ios ]; then
+  ensure_device_unlocked || exit 1
+fi
 echo
-echo ">> running $(basename "$TARGET")  on  $DEV_SERIAL  target=${TARGET_PKG:-none}"
+echo ">> running $(basename "$TARGET")  on  ${DEV_NAME:-$DEV_SERIAL}  target=${TARGET_PKG:-none}"
 echo
 # Each case opens TARGET_PKG itself as its final step (after going home).
 bash "$TARGET"
