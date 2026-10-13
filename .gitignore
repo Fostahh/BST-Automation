@@ -73,3 +73,6 @@ bst-tools.sh
 
 # WebDriverAgent checkout fetched by build-wda.sh
 .wda-src/
+
+# WebDriverAgent IPA built by build-wda.sh
+*.ipa

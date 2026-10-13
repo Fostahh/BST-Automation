@@ -106,6 +106,13 @@ echo "  commit: $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo 'not 
 # --- build -------------------------------------------------------------------
 # Unsigned on purpose: TrollStore fake-signs at install time, so no Apple ID, no team,
 # no provisioning profile and nothing that expires in seven days.
+#
+# The empty app icon name is not cosmetic pedantry. actool insists on a usable simulator
+# runtime before it will compile an asset catalog, and an older Xcode on a current macOS
+# has none it is allowed to use — its bundled runtime is refused with "not supported on
+# hosts after macOS 26.99.99". The build then dies in CompileAssetCatalog with an error
+# that says nothing about icons. WDA is a test runner nobody looks at on the home screen,
+# so dropping the icon costs nothing and removes the dependency entirely.
 BUILD="$SRC/build"
 echo "== building $SCHEME (unsigned) =="
 "$XCB" -project "$SRC/WebDriverAgent.xcodeproj" \
@@ -113,6 +120,7 @@ echo "== building $SCHEME (unsigned) =="
        -sdk iphoneos -configuration Release \
        -derivedDataPath "$BUILD" \
        CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO ENABLE_BITCODE=NO \
+       ASSETCATALOG_COMPILER_APPICON_NAME="" \
        build-for-testing >/dev/null
 
 APP="$(find "$BUILD/Build/Products" -maxdepth 2 -name "$SCHEME-Runner.app" -type d | head -1)"
