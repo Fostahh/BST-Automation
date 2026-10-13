@@ -74,3 +74,7 @@ bst-tools.sh
 # iOS app bundles. Same reasoning as the APK rules above: these are customer binaries
 # and often large, so they must never land in a commit.
 *.ipa
+
+# node_modules for the frida script bundler (lib/js). The compiled bundle IS committed,
+# so running the suite needs no node — only rebuilding the script does.
+lib/js/node_modules/

@@ -1,0 +1,12 @@
+{
+  "name": "bst-ios-ui",
+  "private": true,
+  "description": "frida scripts for the iOS UI layer; compiled because frida 17 no longer ships the ObjC bridge in its runtime",
+  "scripts": {
+    "build": "frida-compile uitree.js -o uitree.bundle.js -c"
+  },
+  "devDependencies": {
+    "frida-compile": "^19.1.0",
+    "frida-objc-bridge": "^8.0.6"
+  }
+}
