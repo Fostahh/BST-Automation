@@ -9,11 +9,27 @@
 # xcodebuild mounts. That build also comes from a current Xcode, whose XCTest requires
 # iOS 17. On an iOS 15/16 device it installs and then refuses to launch.
 #
-# WHY NOT JUST RUN IT WITH XCODEBUILD
-# That works, but it needs a signing certificate and a running xcodebuild, and a free
-# Apple ID certificate expires after seven days. TrollStore signs permanently, so the
-# runner is installed once and keeps working — which is the point of having a jailbroken
-# device in the first place.
+# WHAT THIS IPA CAN AND CANNOT DO
+# TrollStore installs it permanently, with no certificate and nothing that expires, and
+# the HTTP server runs: /status answers, and so do the device-info endpoints and hardware
+# button presses. What does NOT work is anything that inspects an app — reading the
+# element tree, finding an element, tapping one. Those fail with
+#
+#   XCTDaemonErrorDomain Code=41 "Not authorized for performing UI testing actions."
+#   ... or a session bound to "Application 'local.pid.0'" that sees no app at all
+#
+# because XCUITest requires testmanagerd on the device to have authorised the process as
+# a test runner, and that authorisation comes from the `xcodebuild test` handshake rather
+# than from being installed. A sideloaded runner has the frameworks but not the blessing.
+#
+# So this IPA is useful for a persistent, cert-free WDA that can report device state and
+# press buttons. Driving an app still needs:
+#
+#   xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+#     -destination 'id=<UDID>' test-without-building
+#
+# which needs a signing certificate (a free Apple ID works, and expires every 7 days) and
+# keeps running for the duration of the session.
 #
 # So: build unsigned with an Xcode old enough for the device, embed the XCTest frameworks
 # from that same Xcode, strip the debug symbols TrollStore's ldid rejects, and package.
