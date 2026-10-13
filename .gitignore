@@ -71,8 +71,6 @@ bst-tools.sh
 # entire history in a single file — including whatever an earlier scrub removed from it.
 *.bundle
 
-# WebDriverAgent checkout fetched by build-wda.sh
-.wda-src/
-
-# WebDriverAgent IPA built by build-wda.sh
+# iOS app bundles. Same reasoning as the APK rules above: these are customer binaries
+# and often large, so they must never land in a commit.
 *.ipa
