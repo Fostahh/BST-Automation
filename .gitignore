@@ -70,3 +70,6 @@ bst-tools.sh
 # git bundles. A backup made inside the repo and committed by accident would ship an
 # entire history in a single file — including whatever an earlier scrub removed from it.
 *.bundle
+
+# WebDriverAgent checkout fetched by build-wda.sh
+.wda-src/

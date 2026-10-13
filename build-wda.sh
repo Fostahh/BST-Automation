@@ -21,6 +21,7 @@
 #   env: XCODE=<path to Xcode.app>   which Xcode to build with (default: xcode-select)
 #        SCHEME=<name>               default WebDriverAgentRunner
 #        WDA_SRC=<dir>               an existing WebDriverAgent checkout to build
+#        WDA_REF=<tag|commit>        check that out instead of the default branch
 set -euo pipefail
 
 OUT="${1:-$PWD/WebDriverAgent.ipa}"
@@ -54,18 +55,53 @@ case "${MIN%%.*}" in
 esac
 
 # --- sources -----------------------------------------------------------------
+WDA_REPO="${WDA_REPO:-https://github.com/appium/WebDriverAgent}"
 SRC="${WDA_SRC:-}"
 if [ -z "$SRC" ]; then
-  SRC="${TMPDIR:-/tmp}/WebDriverAgent"
-  if [ -d "$SRC/.git" ]; then
-    echo "== reusing checkout: $SRC =="
+  # NOT a shared temp path. This used to default to $TMPDIR/WebDriverAgent and reuse any
+  # directory that happened to have a .git in it. With TMPDIR unset that resolves to /tmp,
+  # which is world-writable: anyone able to create /tmp/WebDriverAgent/.git would have had
+  # this script build THEIR Xcode project — and an .xcodeproj runs arbitrary shell in its
+  # build phases. The result is then packaged and installed on the test device as a
+  # permanently-signed app with full accessibility access. Keep the checkout beside the
+  # suite, where the permissions are the operator's own.
+  SRC="$(cd "$(dirname "$0")" && pwd)/.wda-src"
+fi
+
+if [ -d "$SRC/.git" ]; then
+  # Reusing a checkout is fine; reusing one that points somewhere else is not.
+  HAVE="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
+  if [ "$HAVE" != "$WDA_REPO" ]; then
+    echo "!! $SRC is a git checkout of:" >&2
+    echo "     ${HAVE:-<no origin remote>}" >&2
+    echo "   expected: $WDA_REPO" >&2
+    echo "   Refusing to build it. Remove that directory, or set WDA_REPO if this is" >&2
+    echo "   deliberate — xcodebuild runs whatever build phases the project declares." >&2
+    exit 1
+  fi
+  echo "== reusing checkout: $SRC =="
+  [ -n "${WDA_REF:-}" ] && git -C "$SRC" fetch --depth 1 origin "$WDA_REF" \
+    && git -C "$SRC" checkout -q FETCH_HEAD
+elif [ -e "$SRC" ]; then
+  echo "!! $SRC exists but is not a git checkout. Remove it or set WDA_SRC." >&2
+  exit 1
+else
+  echo "== cloning $WDA_REPO =="
+  if [ -n "${WDA_REF:-}" ]; then
+    git clone --depth 1 --branch "$WDA_REF" "$WDA_REPO" "$SRC"
   else
-    echo "== cloning WebDriverAgent =="
-    git clone --depth 1 https://github.com/appium/WebDriverAgent "$SRC"
+    git clone --depth 1 "$WDA_REPO" "$SRC"
   fi
 fi
+
 [ -f "$SRC/WebDriverAgent.xcodeproj/project.pbxproj" ] \
   || { echo "!! not a WebDriverAgent checkout: $SRC" >&2; exit 1; }
+
+# Say what is about to be built. xcodebuild executes the project's build phases, so the
+# exact commit is the thing being trusted — worth having in the log, and worth being able
+# to pin with WDA_REF rather than silently tracking whatever HEAD is today.
+echo "  source: $SRC"
+echo "  commit: $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
 
 # --- build -------------------------------------------------------------------
 # Unsigned on purpose: TrollStore fake-signs at install time, so no Apple ID, no team,
