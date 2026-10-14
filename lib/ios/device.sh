@@ -2,24 +2,26 @@
 # ios.sh — the iOS counterpart to common.sh. Requires DEV_SERIAL (a devicectl UDID).
 #
 # WHY THIS LOOKS NOTHING LIKE common.sh
-# Nothing on a Mac can synthesise a tap on an iOS device without extra machinery on the
-# phone — WebDriverAgent, idb's companion, or a jailbreak touch injector. All three break
-# whenever iOS or the jailbreak updates, and none of them is what these cases are actually
-# testing. So the taps are yours: each case prints the exact step and gates on it.
+# The Android layer has one way to see the screen (uiautomator) and one way to touch it
+# (input tap). iOS has neither built in, so the work is split in two:
 #
-# What IS automated is the part that goes wrong by hand:
-#   * waiting — for a TestFlight update, for a decrypt to finish
-#   * sequencing — uninstalling the old bundle BEFORE installing the re-signed one
-#   * verification — that the version really changed, that the app really is installed
-# xcrun devicectl does all of that without touching the screen.
+#   * ios/ui.sh  taps and reads the UI, through frida on a jailbroken device. Sourced
+#                below; it explains why XCUITest is not an option here.
+#   * this file  everything that does not touch the screen — the app inventory, the
+#                install and uninstall sequencing, the waiting, and the verdicts.
 #
-# The seams are deliberate. Replacing `gate "tap Full IPA"` with a real tap later is a
-# one-line change per step; the flow around it does not move.
+# The division matters because the taps are the fragile half: they reach into UIKit ivars
+# that move between iOS releases. So a tap that fails falls back to asking the operator
+# (ios_tap_or_ask) and the case still completes. Nothing in this file depends on a tap
+# having been automatic.
 
 : "${DEV_SERIAL:?DEV_SERIAL not set — launch scenarios via run-scenarios.sh}"
 
-IOS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$IOS_LIB/base.sh"            # BST_ROOT, pick_index, int_or, num_or
+IOS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../lib/ios
+. "$IOS_LIB/../base.sh"         # shared with Android: BST_ROOT, pick_index, int_or, num_or
+# The tap layer. It calls step/detail/gate from further down this file — resolved when the
+# case runs, not when this line does, so the order here is not a problem.
+. "$IOS_LIB/ui.sh"              # ios_ui_open, ios_tap_req, ios_tap_or_ask, ios_dump
 
 DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
 
@@ -53,8 +55,6 @@ ios_backend() {
   fi
   printf '%s' "$IOS_BACKEND"
 }
-
-DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
 
 _dc_json() {   # devicectl writes structured output to a file; the human table is padded columns
   local out rc=0
@@ -126,6 +126,17 @@ ios_version() {     # echo the installed version of <bundleid>, empty if absent 
   ios_apps 2>/dev/null | awk -F'\t' -v b="$1" '$1==b{print $2; exit}'
 }
 
+# ios_display_name : what the app is CALLED. TestFlight and Settings list apps by their
+# display name, never by bundle id, so a lookup on those screens needs this.
+ios_display_name() {
+  case "$(ios_backend)" in
+    imd) ideviceinstaller --udid "$DEV_SERIAL" list --user 2>/dev/null \
+           | awk -F', ' -v b="$1" 'NR>1 && $1==b {
+               name=$3; gsub(/^"|"$/, "", name); print name; exit }' ;;
+    *) : ;;
+  esac
+}
+
 ios_os_version() {  # the iOS version, for the opening report. Empty when unreadable.
   case "$(ios_backend)" in
     imd) ideviceinfo --udid "$DEV_SERIAL" -k ProductVersion 2>/dev/null | tr -d '\r' ;;
@@ -152,11 +163,37 @@ ios_uninstall() {   # remove <bundleid>; quiet success when it was not there
   echo "   removed."
 }
 
-ios_launch() {      # best effort; the operator can always tap the icon
+# ios_launch : start <bundleid> with NOTHING of ours inside it.
+#
+# The frida driver asks SpringBoard to launch it, which works for any app including a
+# TrollStore-installed one, and injects nothing. That distinction matters: the app under
+# test must never have frida in it, or its own RASP reports the tester's tooling as a
+# finding and the run is worthless. idevicedebug needs get-task-allow and so only ever
+# worked for development builds; devicectl needs iOS 17. Hence the order.
+ios_launch() {
+  ios_ui_start 2>/dev/null && _ios_cmd 60 launch "$1" && return 0
   case "$(ios_backend)" in
     imd)       idevicedebug --udid "$DEV_SERIAL" run "$1" >/dev/null 2>&1 & disown || true ;;
     devicectl) _dc_json device process launch --terminate-existing "$1" >/dev/null 2>&1 || true ;;
   esac
+}
+
+# ios_launch_checked <bundleid> : launch it and confirm it is running.
+#
+# "is it running?" was a question; the process list is a fact. The question only comes back
+# when the frida driver is down, because then nothing here can see the process list at all.
+ios_launch_checked() {
+  local pkg="$1"
+  ios_launch "$pkg"
+  if ios_wait_running "$pkg"; then
+    detail "running: $pkg (${IOS_UI_RESP#OK })"
+    return 0
+  fi
+  if [ "$IOS_UI_READY" = 1 ]; then
+    echo "!! $pkg did not come up — the launch request was accepted but nothing is running." >&2
+    return 1
+  fi
+  gate "is $pkg running?"      # no driver, so the process list is unreadable from here
 }
 
 # --- talking to the operator ---------------------------------------------------
@@ -181,27 +218,39 @@ gate() {
   done
 }
 
-# await <description> <shell-condition> : poll until the condition holds, or let the
-# operator say it is done / give up. Used for the waits that are easy to get wrong by
-# hand — a TestFlight download, a decrypt — where proceeding early breaks the case.
+# await <description> <shell-condition> : poll until the condition holds, then carry on.
+#
+# For the waits that are easy to get wrong by hand — a decrypt finishing, an install
+# appearing — where continuing early breaks the case. A timeout is a FAILURE, not a
+# question: "continue anyway?" produced runs whose verdict depended on whether someone
+# was feeling patient. Give a slow phone or a large app more room with AWAIT_TRIES.
 await() {
-  local what="$1" cond="$2" tries=0 limit="${AWAIT_TRIES:-60}"
+  local what="$1" cond="$2" tries=0 limit secs
+  limit="$(int_or "${AWAIT_TRIES:-60}" 60 AWAIT_TRIES)"
+  secs="$(num_or "${AWAIT_SLEEP:-5}" 5 AWAIT_SLEEP)"
   printf '      waiting: %s\n' "$what"
   while [ "$tries" -lt "$limit" ]; do
     if eval "$cond"; then printf '      confirmed: %s\n' "$what"; return 0; fi
     tries=$((tries + 1))
-    sleep "${AWAIT_SLEEP:-5}"
+    sleep "$secs"
   done
-  echo "      still not confirmed after $((limit * ${AWAIT_SLEEP:-5}))s." >&2
-  gate "continue anyway?"
+  echo "!! gave up waiting for $what" >&2
+  echo "   waited ${limit} x ${secs}s; raise AWAIT_TRIES if this phone just needs longer." >&2
+  return 1
 }
 
 # --- the flow every iOS case starts with --------------------------------------
-# Identical opening for all six cases: confirm what build is on the phone, and make sure
-# TestFlight is not holding a newer one. Running a scenario against a stale build makes
-# the verdict describe the wrong binary.
+# Identical opening for every iOS case: say what is on the cable, and establish that the
+# build about to be tested is the build meant to be tested. Running a scenario against a
+# stale build makes the verdict describe the wrong binary.
+#
+# This used to be three questions — confirm the device in Settings, pick the TestFlight
+# build, let any UPDATE finish. All three asked a human to confirm something readable from
+# here: the model and iOS version arrive over lockdown, and so does the installed version.
+# So nothing is asked. Set EXPECT_VERSION=<version> to make "the right build" a check
+# rather than an assumption; the run stops if the phone is holding anything else.
 ios_general_rules() {
-  local pkg="$1" before after os backend
+  local pkg="$1" version os backend name
   backend="$(ios_backend)"
   os="$(ios_os_version)"
   printf '  device:  %s%s\n' "${DEV_NAME:-$DEV_SERIAL}" "${os:+  (iOS $os)}"
@@ -219,37 +268,57 @@ ios_general_rules() {
     echo "             brew install libimobiledevice ideviceinstaller" >&2
     echo "           the case still runs; it just cannot check its own steps." >&2
   fi
+  ios_ui_report
 
-  step "Settings > General > About — confirm the device and iOS version"
-  gate "done?"
-
-  step "TestFlight > tap the app under test > scroll to Previous Builds > tap the build you want"
-  detail "target: $pkg"
-  gate "done?"
-
-  before="$(ios_version "$pkg")"
-  ios_can_verify && detail "installed version right now: ${before:-not installed}"
-
-  step "If that build shows an UPDATE button, tap it and let it finish"
-  detail "the case must not continue against the old build"
-  gate "is the build installed and up to date?"
-
-  # Only draw conclusions from the inventory when the inventory is actually readable.
-  # Treating an unreadable one as "not installed" would stop every case on this device.
+  # An unreadable inventory must not be read as "not installed" — that would stop every
+  # case on a device the cases can otherwise drive perfectly well.
   if ! ios_can_verify; then
-    detail "cannot confirm the version from here — trusting your answer above"
+    printf '  build:   cannot be read from here — the case runs against whatever is installed\n'
     return 0
   fi
-  after="$(ios_version "$pkg")"
-  if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
-    detail "version changed: $before -> $after"
-  elif [ -n "$after" ]; then
-    detail "version: $after (unchanged)"
-  fi
-  if [ -z "$after" ]; then
-    echo "!! $pkg is not installed on the device — TestFlight has not put it there yet." >&2
+
+  version="$(ios_version "$pkg")"
+  if [ -z "$version" ]; then
+    echo "!! $pkg is not installed on this device." >&2
+    echo "   install the build under test (TestFlight, or iOS case 4) and run this again." >&2
     return 1
   fi
+
+  # --- the two screens, opened on the phone ------------------------------------
+  # Performed, not asked and not skipped. The values below are read over lockdown, so the
+  # script does not need these screens — the tester watching, and the recording, do.
+  step "Settings > General > About"
+  if ios_open_url "prefs:root=General&path=About"; then
+    detail "${DEV_NAME:-$DEV_SERIAL}${os:+ — iOS $os}, read over lockdown and now on screen"
+    sleep "$IOS_SHOW"
+  else
+    detail "could not open Settings from here — ${DEV_NAME:-$DEV_SERIAL}${os:+, iOS $os}"
+  fi
+
+  name="$(ios_display_name "$pkg")"
+  step "TestFlight > ${name:-$pkg}"
+  if ios_open_or_ask com.apple.TestFlight TestFlight; then
+    # The row reads "<Name>, Version <version> (<build>)". Matching on the name AND the
+    # word Version lands on the row itself rather than the "<Name> app icon" beside it.
+    if [ -n "$name" ] && ios_tap_in_list "$name, Version"; then
+      detail "opened the TestFlight entry for $name"
+    else
+      detail "could not single out ${name:-$pkg} in the list — leaving TestFlight on Apps"
+    fi
+    sleep "$IOS_SHOW"
+  fi
+
+  # The UPDATE button is deliberately NOT tapped. Every row on that screen has one, they
+  # are identical, and the one belonging to this app is identified only by where it sits —
+  # so a miss would start installing a different client's app. The build that matters is
+  # checked below against what is actually installed, which cannot be mistaken.
+  if [ -n "${EXPECT_VERSION:-}" ] && [ "$EXPECT_VERSION" != "$version" ]; then
+    echo "!! the phone has $pkg $version, and EXPECT_VERSION says $EXPECT_VERSION." >&2
+    echo "   install that build in TestFlight — it is open on the entry — and run again." >&2
+    return 1
+  fi
+  printf '  build:   %s %s%s\n' "$pkg" "$version" \
+    "${EXPECT_VERSION:+  (matches EXPECT_VERSION)}"
 }
 
 # --- end of every case --------------------------------------------------------

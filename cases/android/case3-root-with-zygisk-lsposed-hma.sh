@@ -7,7 +7,7 @@
 #        display name differs from its package id (defaults to TARGET_PKG).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"
+source "$HERE/../../lib/android/common.sh"
 detect_size
 : "${TARGET_PKG:?Case 3 needs TARGET_PKG}"
 

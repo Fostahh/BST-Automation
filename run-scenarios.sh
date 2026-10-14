@@ -34,8 +34,16 @@ intro() {
   Android   ready — 8 scenarios: plain root, Zygisk + LSPosed, Hide My
             Applist, Frida function hooking, debug android-unpinner,
             virtual-environment cloning, certificate tamper/re-sign APK, emulator.
-  iOS       planned — jailbreak detection [palera1n, bootstrap], Frida hooking,
-            re-signed IPA, dynamic lib injection. Not implemented yet.
+  iOS       2 scenarios on a jailbroken device: decrypt + re-sign through
+            TrollStore, dylib injection through TrollFools. The taps are real
+            — frida reads and drives the UI, since XCUITest would need a
+            signing certificate. Jailbreak detection and Frida hooking: not
+            implemented yet.
+
+  iOS needs   a jailbroken iPhone with frida-server running, a python that
+              can `import frida`, and libimobiledevice for the app inventory
+              (brew install libimobiledevice ideviceinstaller). Without the
+              frida side the cases still run and ask you to tap.
 
   Recommended layout — keep this suite next to android-unpinner and your
   frida hooks, and both are found without configuring anything.
@@ -45,6 +53,11 @@ intro() {
     BST/
     ├── Automation/                this suite
     │   ├── run-scenarios.sh       <- you are here
+    │   ├── cases/android/         the 8 Android scenarios
+    │   ├── cases/ios/             the 2 iOS scenarios
+    │   ├── lib/                   base.sh, devices.sh, preflight.sh — shared
+    │   │   ├── android/           adb + uiautomator layer, and its python
+    │   │   └── ios/               libimobiledevice + frida layer, its python and js
     │   └── extracted/             APKs pulled or patched by cases 5, 7, 8
     └── fridaenv/                  python venv, sibling of Automation/
         ├── bin/android-unpinner   case 5 — also supplies aapt2
@@ -73,22 +86,19 @@ pick_device || exit 1
 echo
 
 # --- 3) scenario --------------------------------------------------------------
-# A case may declare "# PLATFORM: ios" in its header. No header means android, so the
-# eight existing cases need no edit and an iOS case can simply be dropped into cases/.
+# The folder decides the platform: cases/android/ and cases/ios/ are listed by the
+# platform the device settled, so dropping a case in is all it takes to register it.
+# Each case's menu label is the "# NAME:" line in its header.
 echo "== Scenarios ($PLATFORM) =="
 i=0
 CASES=()
-for f in "$HERE"/cases/*.sh; do
+for f in "$HERE/cases/$PLATFORM"/*.sh; do
   [ -e "$f" ] || continue
-  plat="$(grep -m1 '^# PLATFORM:' "$f" 2>/dev/null | sed 's/^# PLATFORM:[[:space:]]*//' \
-          | tr '[:upper:]' '[:lower:]' || true)"
-  [ -n "$plat" ] || plat=android
-  [ "$plat" = "$PLATFORM" ] || continue
   i=$((i+1)); CASES[$i]="$f"
   name="$(grep -m1 '^# NAME:' "$f" 2>/dev/null | sed 's/^# NAME:[[:space:]]*//' || true)"
   printf "  %d) %s\n" "$i" "${name:-$(basename "$f")}"
 done
-[ "$i" -gt 0 ] || { echo "no $PLATFORM scenarios in cases/" >&2; exit 1; }
+[ "$i" -gt 0 ] || { echo "no scenarios in cases/$PLATFORM/" >&2; exit 1; }
 echo
 
 read -rp "scenario number: " SEL || SEL=""
@@ -117,7 +127,7 @@ export DELAY_SCALE
 
 # Case 8 owns its own source selection: manual mode installs a local APK onto the
 # emulator and needs no phone, so it must not pass through the device prompt below.
-# lib/py/emulator-case.py asks for the source phone and the package itself.
+# lib/android/py/emulator-case.py asks for the source phone and the package itself.
 if [ "$(basename "$TARGET")" = case8-emulator.sh ]; then
   # Hand over the device if one is attached (its automatic mode extracts from a phone);
   # manual mode installs a local APK and needs none, which is why it runs before the
@@ -138,14 +148,14 @@ fi
   exit 1
 }
 export DEV_SERIAL DEV_NAME PLATFORM
-# Two different UI layers, because the device interfaces have nothing in common: common.sh
-# is adb and uiautomator throughout, ios.sh is devicectl and gated manual steps. Sourcing
-# the wrong one fails immediately — common.sh would try to adb a devicectl udid.
+# Two different layers, because the device interfaces have nothing in common: lib/android
+# is adb and uiautomator throughout, lib/ios is libimobiledevice and frida. Sourcing the
+# wrong one fails immediately — common.sh would try to adb an iOS udid.
 if [ "$PLATFORM" = ios ]; then
-  source "$HERE/lib/ios.sh"
+  source "$HERE/lib/ios/device.sh"
 else
-  source "$HERE/lib/common.sh"
-  source "$HERE/lib/device-ready.sh"
+  source "$HERE/lib/android/common.sh"
+  source "$HERE/lib/android/device-ready.sh"
 fi
 
 # --- 5) target app: DenyList-checked during the scenario AND opened after it ---
@@ -245,7 +255,7 @@ if [ -n "$TARGET_PKG" ]; then
   if [ "$PLATFORM" = ios ]; then
     printf '[%s] %s\n' "$TARGET_PKG" "$(ios_version "$TARGET_PKG" || echo 'version unknown')"
   else
-    python3 "$HERE/lib/py/app-info.py" "$DEV_SERIAL" "$TARGET_PKG" \
+    python3 "$HERE/lib/android/py/app-info.py" "$DEV_SERIAL" "$TARGET_PKG" \
       || echo 'WARN: app summary unavailable — continuing.' >&2
   fi
 fi

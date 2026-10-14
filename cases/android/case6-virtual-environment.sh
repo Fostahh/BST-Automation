@@ -9,7 +9,7 @@
 #   env: SUPERCLONE_PKG  PARALLEL_PKG  GBOX_PKG
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"          # adbx(), launch(), focus_now(), ui_tap_fresh()
+source "$HERE/../../lib/android/common.sh"          # adbx(), launch(), focus_now(), ui_tap_fresh()
 
 SUPERCLONE_PKG="${SUPERCLONE_PKG:-com.polestar.super.clone}"   # label: "Super Clone"
 PARALLEL_PKG="${PARALLEL_PKG:-com.lbe.parallel.intl}"          # label: "Parallel Space"

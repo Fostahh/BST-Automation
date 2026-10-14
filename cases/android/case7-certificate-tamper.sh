@@ -6,13 +6,13 @@
 # Uninstalling clears the target app's local data. The signed build remains installed.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$HERE/../lib/common.sh"
+source "$HERE/../../lib/android/common.sh"
 
 # Bound every ADB call, so a polling deadline cannot hang on a device that dropped off
 # the bus. adb_t (common.sh) is a bash watchdog; this used to spawn a python interpreter
 # per call, inside loops that poll every 2s for up to ten minutes.
 adbx() { adb_t "${ADB_TIMEOUT:-45}" "$@"; }
-source "$HERE/../lib/mtmanager.sh"
+source "$HERE/../../lib/android/mtmanager.sh"
 
 c7_fail() { echo "!! $*" >&2; return 1; }
 

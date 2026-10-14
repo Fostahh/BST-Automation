@@ -14,12 +14,12 @@
 #
 #   Uses DEV_SERIAL + TARGET_PKG exported by run-scenarios.sh.
 #   env: USE_VENV=1|0   SERVER_DIR=<dir>   MODE=spawn|attach
-#        MT_PKG=<pkg>   MT Manager package (default bin.mt.plus, via lib/mtmanager.sh)
+#        MT_PKG=<pkg>   MT Manager package (default bin.mt.plus, via lib/android/mtmanager.sh)
 #        FRIDA_PORT=<n> the port the stale-server checks key off (default 27042)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"                      # adbx(), inp(), launch(), focus_now(), swipr(), detect_size()
-source "$HERE/../lib/mtmanager.sh"                   # mt_jump_to() — was duplicated here
+source "$HERE/../../lib/android/common.sh"                      # adbx(), inp(), launch(), focus_now(), swipr(), detect_size()
+source "$HERE/../../lib/android/mtmanager.sh"                   # mt_jump_to() — was duplicated here
 # FRIDAENV and BST_ROOT come from lib/base.sh via common.sh.
 HOOK_DIR="${HOOK_DIR:-}"                             # set HOOK_DIR to your own folder of .js hooks
 
@@ -89,9 +89,7 @@ while ! ls "$HOOK_DIR"/*.js >/dev/null 2>&1; do
   [ -n "$HOOK_DIR" ] && echo "   no .js hooks in: $HOOK_DIR" >&2
   read -rp "frida hooks folder (the one holding your .js files): " HOOK_DIR \
     || { echo "!! a hooks folder is required for case 4." >&2; exit 1; }
-  HOOK_DIR="${HOOK_DIR%\"}"; HOOK_DIR="${HOOK_DIR#\"}"      # tolerate drag-and-drop quoting
-  HOOK_DIR="${HOOK_DIR%\'}"; HOOK_DIR="${HOOK_DIR#\'}"
-  case "$HOOK_DIR" in "~"*) HOOK_DIR="$HOME${HOOK_DIR#\~}";; esac   # read does not expand ~
+  HOOK_DIR="$(clean_path "$HOOK_DIR")"       # drag-and-drop quoting, escapes and ~
 done
 SERVER_DIR="${SERVER_DIR:-/data/local/tmp}"          # MT Manager shows this as "tmp" (no spaces)
 FRIDA_PORT="${FRIDA_PORT:-27042}"   # frida's default; the stale-server checks key off it

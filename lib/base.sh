@@ -40,6 +40,26 @@ pick_index() {
   return 1                                            # in range of nothing printed
 }
 
+# --- paths a human typed -------------------------------------------------------
+# clean_path <text> : a path as someone supplied it -> a path the filesystem accepts.
+#
+# Dragging a file into Terminal, or tab-completing one, pastes it SHELL-ESCAPED:
+#   /path/My App_1.0.apk   arrives as   /path/My\ App_1.0.apk
+# `read` performs none of that unescaping, so the backslash stays in the string and the
+# open fails on a file that is plainly sitting there. Quotes arrive the same way, and
+# `read` does not expand a leading ~ either.
+clean_path() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"                    # leading whitespace
+  s="${s%"${s##*[![:space:]]}"}"                    # trailing whitespace
+  s="${s%\"}"; s="${s#\"}"; s="${s%\'}"; s="${s#\'}"   # one layer of matching quotes
+  # ponytail: drops every backslash, so a path containing a literal one loses it. Those
+  # do not happen on a Mac; pasted escapes happen constantly.
+  case "$s" in *\\*) s="$(printf '%s' "$s" | sed 's/\\\(.\)/\1/g')" ;; esac
+  case "$s" in "~") s="$HOME" ;; "~/"*) s="$HOME/${s#\~/}" ;; esac
+  printf '%s' "$s"
+}
+
 # --- numeric knobs ------------------------------------------------------------
 # _num_warn speaks up only when the caller names the knob, so an ordinary default is quiet
 # while a value someone actually supplied gets told it was rejected.

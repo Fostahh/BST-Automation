@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # mtmanager.sh — shared MT Manager (bin.mt.plus) UI automation.
 # Used by case 5 (Debug Testing) and case 7 (Certificate Tamper).
-# Source AFTER lib/common.sh — relies on adbx(), launch(), ui_dump(), ui_tap_req(),
+# Source AFTER lib/android/common.sh — relies on adbx(), launch(), ui_dump(), ui_tap_req(),
 # $UI_XML and $BST_AUTOMATION from there (the last via lib/base.sh).
-# Taps/reads go through lib/py/uifind.py and are resolution-independent.
+# Taps/reads go through lib/android/py/uifind.py and are resolution-independent.
 #
 # The px()/py() windows below need W/H, so every caller must have run detect_size first
-# (case 5 and lib/emulator-extract.sh now do; cases 4 and 7 already did). They used to be
+# (case 5 and lib/android/emulator-extract.sh now do; cases 4 and 7 already did). They used to be
 # raw pixel counts tuned on a 1080x2340 screen: on a denser display a top bar sat below
 # y=300 and was never found, and on a shorter one miny=300 stopped excluding the search
 # bar, so "tap the package row" could land on something else entirely.

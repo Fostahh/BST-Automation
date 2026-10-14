@@ -15,17 +15,15 @@
 #    install step AFTER creating <name>.unpinned.apk — expected; we install via adb.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"                      # adbx(), launch(), ui_dump(), $UI_XML, LIB
-source "$HERE/../lib/mtmanager.sh"                    # MT Manager helpers: mt_launch_fresh/login/extract/convert
+source "$HERE/../../lib/android/common.sh"                      # adbx(), launch(), ui_dump(), $UI_XML, LIB
+source "$HERE/../../lib/android/mtmanager.sh"                    # MT Manager helpers: mt_launch_fresh/login/extract/convert
 # FRIDAENV comes from lib/base.sh via common.sh.
 detect_size          # mtmanager.sh locates MT Manager's bars by fractions of W/H
-
-unquote() { local s="$1"; s="${s%\"}"; s="${s#\"}"; s="${s%\'}"; s="${s#\'}"; printf '%s' "$s"; }
 
 # Resolve a runnable android-unpinner from a user-supplied path/dir, else auto-detect.
 resolve_unpinner() {
   local in c
-  in="$(unquote "${1:-}")"
+  in="$(clean_path "${1:-}")"
   if [ -n "$in" ]; then
     if [ -d "$in" ]; then
       for c in "$in/bin/android-unpinner" "$in/android-unpinner"; do
@@ -90,7 +88,7 @@ echo "   using: $UNPINNER_CMD"
 
 # --- 3) APK source: auto-extract from the device, or a manual local path ------
 # APK=<file> env implies manual; APK_SOURCE=auto|manual skips the prompt.
-APK="$(unquote "${APK:-}")"
+APK="$(clean_path "${APK:-}")"
 SRC="${APK_SOURCE:-}"
 [ -n "$APK" ] && SRC=manual
 # Enter takes the default (auto). An unrecognised answer is asked again rather than
@@ -107,7 +105,7 @@ while [ -z "$SRC" ]; do
 done
 case "$SRC" in
   m|M|manual|Manual)
-    if [ -z "$APK" ]; then read -rp "   path to the APK (.apk): " APK; APK="$(unquote "$APK")"; fi
+    if [ -z "$APK" ]; then read -rp "   path to the APK (.apk): " APK; APK="$(clean_path "$APK")"; fi
     [ -n "$APK" ] || { echo "!! APK path is required." >&2; exit 1; }
     [ -f "$APK" ] || { echo "!! not a file: $APK" >&2; exit 1; }
     case "$APK" in *.apk|*.APK) : ;; *) echo "!! '$APK' is not a .apk file." >&2; exit 1 ;; esac

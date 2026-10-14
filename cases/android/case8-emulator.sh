@@ -7,4 +7,4 @@
 # Manual mode needs no physical device. The emulator stays open after completion.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-exec python3 -u "$HERE/../lib/py/emulator-case.py"
+exec python3 -u "$HERE/../../lib/android/py/emulator-case.py"

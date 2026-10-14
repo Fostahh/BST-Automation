@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Case 8: prepare an APK set while an Android Studio AVD starts, then install."""
 import os
+import shlex
 from pathlib import Path
 import re
 import shutil
@@ -11,11 +12,11 @@ import tempfile
 import time
 import zipfile
 
-PYLIB = Path(__file__).resolve().parent        # Automation/lib/py
-LIB = PYLIB.parent                            # Automation/lib (the .sh helpers)
+PYLIB = Path(__file__).resolve().parent        # Automation/lib/android/py
+LIB = PYLIB.parent                            # Automation/lib/android (the .sh helpers)
 # Same tree as lib/base.sh: BST_ROOT holds Automation/ and the author's fridaenv/.
 # run-scenarios.sh exports it; the fallback keeps a direct `python3 emulator-case.py` working.
-BST_ROOT = Path(os.environ.get("BST_ROOT") or LIB.parents[1])
+BST_ROOT = Path(os.environ.get("BST_ROOT") or LIB.parents[2])
 
 
 def _nap(seconds):
@@ -38,6 +39,25 @@ def run(args, timeout=30):
         detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
         raise RuntimeError(detail or f"Command failed: {args[0]}")
     return result.stdout.strip()
+
+
+def clean_path(value):
+    """A path as someone supplied it -> a path the filesystem accepts.
+
+    Dragging a file into Terminal, or tab-completing one, pastes it SHELL-ESCAPED:
+    "/x/My App_1.0.apk" arrives as "/x/My\\ App_1.0.apk". input() does none of that
+    unescaping, so the backslash lands in the filename and the open fails on a file
+    that is plainly there. shlex applies the shell's own rules, quotes included.
+
+    A path typed with real spaces and no escaping splits into several words; that is
+    someone writing it literally, so it is taken literally.
+    """
+    value = value.strip()
+    try:
+        parts = shlex.split(value)
+    except ValueError:                      # an unbalanced quote — take it as typed
+        return value
+    return parts[0] if len(parts) == 1 else value
 
 
 def adb(serial, *args, timeout=30):
@@ -356,9 +376,8 @@ def main():
         directory = Path(directory)
         expected = None
         if mode == "manual":
-            value = os.environ.get("APK") or input("Local APK/APKS path on this Mac: ").strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
+            value = clean_path(os.environ.get("APK")
+                               or input("Local APK/APKS path on this Mac: "))
             source = Path(value).expanduser().resolve()
             if not source.is_file():
                 raise RuntimeError(f"APK/APKS file not found: {source}")

@@ -77,4 +77,4 @@ bst-tools.sh
 
 # node_modules for the frida script bundler (lib/js). The compiled bundle IS committed,
 # so running the suite needs no node — only rebuilding the script does.
-lib/js/node_modules/
+lib/ios/js/node_modules/

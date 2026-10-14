@@ -19,7 +19,10 @@ mkdir -p "$STAGE/Automation"
 cp "$HERE/run-scenarios.sh" "$STAGE/Automation/"
 cp -R "$HERE/lib" "$HERE/cases" "$STAGE/Automation/"
 # never ship local artefacts or backups (there is no machine-local config any more)
-rm -rf "$STAGE/Automation/extracted" "$STAGE/Automation/lib/py/__pycache__"
+# node_modules is the frida-compile toolchain, tens of megabytes of it, and the bundle
+# does not need it: lib/ios/js/uitree.bundle.js is the compiled script that actually runs.
+rm -rf "$STAGE/Automation/extracted" "$STAGE/Automation"/lib/*/py/__pycache__ \
+       "$STAGE/Automation/lib/ios/js/node_modules" "$STAGE/Automation/lib/ios/js/package-lock.json"
 find "$STAGE/Automation" \( -name '*.bak' -o -name '.DS_Store' -o -name '*.apk' -o -name '*.apks' \) -delete
 
 {
@@ -44,7 +47,8 @@ DIR="$(mktemp -d "${TMPDIR:-/tmp}/bst-tools.XXXXXX")"
 trap 'rm -rf "$DIR"' EXIT
 b64d() { if base64 --decode </dev/null >/dev/null 2>&1; then base64 --decode; else base64 -D; fi; }
 awk -v m="$MARK" 'f{print} $0==m{f=1}' "$0" | b64d | tar xzf - -C "$DIR"
-chmod +x "$DIR/Automation/run-scenarios.sh" "$DIR/Automation"/lib/*.sh "$DIR/Automation"/cases/*.sh 2>/dev/null || true
+chmod +x "$DIR/Automation/run-scenarios.sh" 2>/dev/null || true
+find "$DIR/Automation/lib" "$DIR/Automation/cases" -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
 # Retrieved/patched APKs must outlive the unpacked copy, which is deleted on exit.
 export EXTRACTED_DIR="${EXTRACTED_DIR:-$PWD/bst-extracted}"
 echo "APKs retrieved by cases 5/8 are kept in: $EXTRACTED_DIR"

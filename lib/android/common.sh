@@ -3,7 +3,7 @@
 # Requires DEV_SERIAL in env (run-scenarios.sh sets it).
 #
 # UI interaction is resolution-independent: elements are located in a live
-# `uiautomator dump` by their text / resource-id (lib/py/uifind.py) and tapped at
+# `uiautomator dump` by their text / resource-id (lib/android/py/uifind.py) and tapped at
 # their real bounds, and toggle state is read from the node's `checked` attribute
 # — no fixed pixel coordinates and no screenshot colour sampling. Swipes still use
 # ratios (px/py) because a scroll gesture needs no precision.
@@ -28,8 +28,8 @@
 
 : "${DEV_SERIAL:?DEV_SERIAL not set — launch scenarios via run-scenarios.sh}"
 
-LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this lib/ dir (the .sh helpers; python lives in lib/py)
-. "$LIB/base.sh"                                      # BST_ROOT, FRIDAENV, pick_index, int_or
+LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../lib/android (its python is in py/)
+. "$LIB/../base.sh"                                   # shared with iOS: BST_ROOT, FRIDAENV, pick_index, int_or
 
 # Magisk module titles as shown on the Modules screen (override per device/version).
 MOD_LSPOSED="${MOD_LSPOSED:-Zygisk - LSPosed}"

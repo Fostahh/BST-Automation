@@ -6,7 +6,7 @@
 #   env: TARGET_PKG=<pkg>   REBOOT=1   DL_SEARCH=<term>
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-source "$HERE/../lib/common.sh"
+source "$HERE/../../lib/android/common.sh"
 detect_size
 : "${TARGET_PKG:?Case 1 needs TARGET_PKG}"
 

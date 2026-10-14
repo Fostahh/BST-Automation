@@ -1,6 +1,7 @@
 # BST Tools — Automation
 
-A test harness for checking whether an Android app detects a compromised environment.
+A test harness for checking whether an **Android or iOS** app detects a compromised
+environment.
 
 It does not attack the app. It automates building the **device states** an attacker would
 use, launches the app, and lets the app's own RASP checks give the verdict. Done by hand,
@@ -29,6 +30,28 @@ Each case puts the device into one adversarial state and opens the target app.
 | 6 | App cloned into Super Clone / Parallel Space / GBox | app-level virtualisation (works unrooted) |
 | 7 | APK repackaged with a foreign signing certificate | signature / integrity verification |
 | 8 | Extracted APK/APKS installed on a clean emulator | emulator detection |
+
+### iOS
+
+Two scenarios, on a jailbroken device. The taps are real: frida reads and drives the UI
+from inside the tool it is driving.
+
+| # | State | Detection under test |
+|---|-------|----------------------|
+| 4 | TestFlight build decrypted with TrollDecrypt, re-installed through TrollStore | re-signed debuggable build |
+| 5 | SSLKillSwitch injected into the bundle with TrollFools | foreign dylib in the address space, pinning |
+
+Needs a jailbroken iPhone running frida-server, a python that can `import frida`, and
+`libimobiledevice` for the app inventory (`brew install libimobiledevice ideviceinstaller`).
+Without the frida half the cases still run end to end — each step asks for the tap instead
+of making it, and says why.
+
+Nothing an iOS case can read is asked about. The model and iOS version arrive over
+lockdown, the installed build is read from the inventory (and checked against
+`EXPECT_VERSION` when you set it), a launch is confirmed against the process list, and
+TrollFools' injection log is printed into the run output rather than put to the operator as
+"does this look right?". The only question left in a healthy run is the file picker, which
+belongs to another process — see below.
 
 Cases 1–3 are declarative — `apply_state <modules> <enforce-denylist> <target-in-denylist>`.
 A shared engine reads the current Magisk state, changes only what differs, reboots only when
@@ -61,8 +84,8 @@ never written to disk.
 
 The platform is derived rather than asked: `adb` only ever sees Android, so an attached
 device settles it. iOS is looked for only when no Android device is found — an iPhone
-paired to Xcode must not interrupt an Android run — and reports that no iOS scenarios
-exist yet.
+paired to Xcode must not interrupt an Android run — and the scenario list is filtered by
+the `# PLATFORM:` header each case declares.
 
 ## Usage
 
@@ -88,6 +111,12 @@ Useful environment variables:
 | `TARGET_PREFIX` | **required** package namespace for the app list — asked until given, so no client prefix lives in the repo. The run stops if nothing matches it |
 | `MOD_ZNEXT` / `MOD_LSPOSED` | the module titles as the Modules screen shows them, for cases 1–3 |
 | `SKIP_PREFLIGHT` | skip the dependency checks |
+| `IOS_TAP_RETRIES` / `IOS_TAP_SLEEP` | how long an iOS lookup waits for an element to appear |
+| `IOS_SCROLL_PAGES` | how far to page an iOS list looking for a row (default 20) |
+| `IOS_PY` | a python that can `import frida`, if the search for one misses it |
+| `TROLLFOOLS_SCOPE` | which TrollFools tab lists the app under test: `All`, `User`, `TrollStore`, `System` |
+| `EXPECT_VERSION` | the build an iOS case is meant to test — the run stops if the phone holds another one |
+| `AWAIT_TRIES` / `AWAIT_SLEEP` | how long an iOS case waits for a decrypt or an install before giving up |
 
 Every case ends by offering to launch the app again (`open <pkg> again? [y/N]`), as
 often as you like. Detection can hinge on a cold start or on what the app cached last
@@ -100,15 +129,35 @@ Retrieved and patched APKs land in `extracted/` (or `$EXTRACTED_DIR`).
 ## Layout
 
 ```
-run-scenarios.sh    intro + preflight, then platform / scenario / device / target
-cases/              one script per scenario
-lib/                base.sh (paths, menu + number parsing — sourced first by everything),
-                    common.sh (UI layer, Magisk state engine), mtmanager.sh, preflight.sh,
-                    devices.sh (device + platform detection), device-ready.sh (keyguard)
-lib/py/             uifind.py (element lookup), u2driver.py (persistent uiautomator2 agent),
-                    emulator-case.py (case 8), app-info.py
-make-bundle.sh      packs everything into a single self-extracting bst-tools.sh
+run-scenarios.sh        intro + preflight, then device / scenario / target
+make-bundle.sh          packs everything into a single self-extracting bst-tools.sh
+
+cases/android/          the 8 Android scenarios, one script each
+cases/ios/              the 2 iOS scenarios
+
+lib/base.sh             paths, menu + number parsing — sourced first by everything
+lib/devices.sh          device and platform detection, for both
+lib/preflight.sh        the dependency report
+
+lib/android/common.sh   the UI layer and the Magisk state engine
+lib/android/mtmanager.sh   MT Manager helpers (cases 4, 5, 7, 8)
+lib/android/device-ready.sh   keyguard
+lib/android/emulator-extract.sh   case 8's extraction step
+lib/android/py/         uifind.py (element lookup), u2driver.py (persistent uiautomator2
+                        agent), emulator-case.py (case 8), app-info.py
+
+lib/ios/device.sh       app inventory, install/uninstall, launch, the verdicts
+lib/ios/ui.sh           the tap layer
+lib/ios/py/iosdriver.py persistent frida driver
+lib/ios/js/             uitree.js — reads and taps an iOS view tree; uitree.bundle.js is
+                        the compiled form that ships, so running it needs no node
 ```
+
+The split is along the device interface, not along the feature: nothing in `lib/android`
+knows about frida or bundle ids, nothing in `lib/ios` knows about adb, and the three files
+left in `lib/` are the ones both sides actually share. The platform a case belongs to is
+its folder — `cases/$PLATFORM/*.sh` is what the menu lists, so adding a case is dropping a
+file in, with a `# NAME:` line for its label.
 
 ## Notes
 
@@ -131,6 +180,36 @@ must land on that label's row, within twice its height, so it cannot silently gr
 different row's switch. Two couplings are not solved by any of that: every match is an
 **English** UI string, and the `resource-id`s belong to Magisk, MT Manager and the system
 installer, so a non-English device or an app update can still break a flow.
+
+### The iOS tap layer
+
+XCUITest is Apple's way to drive an app, and it needs testmanagerd to authorise the process
+as a test runner — which only the `xcodebuild test` handshake grants. A sideloaded
+WebDriverAgent therefore serves HTTP, presses hardware buttons, and sees no application at
+all (`XCTDaemonErrorDomain 41`); TrollStore solves signing, not that authorisation. On a
+jailbroken device frida is already inside the process, so `lib/ios/js/uitree.js` reads UIKit
+directly — no certificate, no Apple tooling, nobody else's signing identity.
+
+It does not synthesise a touch. iOS 16 removed what that needs (`UITouch` has no `_view`
+any more, `UIApplication` no longer answers `_touchesEvent`), so each tap invokes the
+handler the touch would have reached, and **reports which route fired** — so a caller can
+tell a real action from a silent no-op. Routes, all proven on hardware: a `UIControl`
+through the event it is actually registered for, a `UIBarButtonItem` through its own
+target/action, a `UIMenu` entry through its handler (addressable before the menu is even
+open), a `UIAlertController` button, a table or collection row through its delegate, a
+segmented control through its selection, a tap recogniser, and anything SwiftUI through
+`accessibilityActivate`. A view with nothing registered is a failure, not a tap.
+
+SwiftUI needs that last route: its text is drawn into private views that carry no label and
+exposed as accessibility elements instead, so a view-only walk saw TrollFools' app list as
+182 views of which 17 said anything. The elements say `"Name, bundle.id, version"`, which is
+how a row is found by bundle id rather than by display name.
+
+Two limits are real. A file picker is a `UIDocumentPickerViewController` — a remote view
+belonging to another process — so nothing inside the app can touch it; those steps ask for
+the tap and say why. And the app under test is only ever **launched**, never injected into:
+frida inside it would make its own RASP report the tester's tooling, which is worse than no
+result at all.
 
 Driving the real UI is deliberate. A shortcut over `adb shell` could leave an artefact the
 app distinguishes from the real thing — and then the shortcut gets tested, not the defence.

@@ -54,7 +54,23 @@ _pf_ios_attached() {
 # CoreDeviceError 1014. libimobiledevice speaks the lockdown protocol those devices do
 # support. Without either, the iOS cases still run as gated manual flows; they just cannot
 # verify their own steps, which is the whole reason they are scripted.
+# The taps are a SEPARATE dependency from the inventory: libimobiledevice reads what is
+# installed, frida is what makes the taps happen, and either can be missing without
+# stopping a case. ios_ui_python is the same search the tap layer itself does, sourced
+# rather than copied so the two cannot drift apart.
+_pf_ios_taps() {
+  . "$BST_LIB/ios/ui.sh"
+  local py
+  if py="$(ios_ui_python)"; then
+    _pf_row "ios taps" "ok ($py)"
+  else
+    _pf_row "ios taps" "manual — no python here can 'import frida', so the iOS cases"
+    _pf_row "" "will ask for each tap instead of making it"
+  fi
+}
+
 _pf_ios() {
+  _pf_ios_taps
   if command -v ideviceinstaller >/dev/null 2>&1 && command -v ideviceinfo >/dev/null 2>&1; then
     _pf_row "ios tooling" "ok (libimobiledevice — covers iOS 15/16 and up)"
     return 0
@@ -173,10 +189,14 @@ _pf_uiautomator2() {
 preflight() {
   [ "${SKIP_PREFLIGHT:-}" = 1 ] && return 0
   echo "== preflight =="
-  local missing=0 t
-  for t in adb python3; do
-    _pf_have "$t" && _pf_row "$t" "ok" || { _pf_row "$t" "MISSING — required by every case"; missing=1; }
-  done
+  local missing=0
+  # python3 really is universal: the runner, both UI layers and every helper need it.
+  # adb is not — it is the Android half, and a machine with only iOS tooling used to be
+  # stopped here before it could reach an iOS scenario at all.
+  _pf_have python3 && _pf_row "python3" "ok" \
+    || { _pf_row "python3" "MISSING — required by every case"; missing=1; }
+  _pf_have adb && _pf_row "adb" "ok" \
+    || _pf_row "adb" "missing — the Android cases cannot run (iOS is unaffected)"
   # _pf_tool runs inside "$( )", so a flag it sets dies with that subshell — the BROKEN
   # verdict has to travel back in the string itself.
   local w
