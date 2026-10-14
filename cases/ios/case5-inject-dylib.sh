@@ -46,24 +46,27 @@ VERSION_BEFORE="$(ios_version "$PKG")"
 
 # --- TrollFools ----------------------------------------------------------------
 step "Open TrollFools"
-ios_open_or_ask "$TROLLFOOLS_ID" TrollFools
+ios_ui_open "$TROLLFOOLS_ID" || exit 1
 
 # The scope tab decides which apps are listed at all, and it does not default to the one
 # with the app under test in it: a TestFlight build is a user app, and TrollFools opens on
 # System. Without this the next step searches a list the app was never in.
 step "Switch the scope to $TROLLFOOLS_SCOPE so $PKG is listed"
 detail "set TROLLFOOLS_SCOPE=User|TrollStore|System if the app is filed elsewhere"
-ios_tap_or_ask "$TROLLFOOLS_SCOPE" "tap the $TROLLFOOLS_SCOPE tab above the app list"
+ios_tap_req "$TROLLFOOLS_SCOPE" || exit 1
+nap "$NAP_SHORT"
 
 # Searching by bundle id, not by name: the row says "Name, bundle.id, version", so the
 # bundle id identifies exactly one row while a display name may not. The list is paged
 # through until the row appears, because a row that has not been scrolled to does not
 # exist in any form on an iOS list.
 step "Find $PKG in the list and tap it"
-ios_row_or_ask "$PKG" "find $PKG in the list — the search field filters it — and tap it"
+ios_tap_in_list "$PKG" || exit 1
+nap "$NAP_NAV"
 
 step "Tap Inject"
-ios_tap_or_ask Inject
+ios_tap_req Inject || exit 1
+nap "$NAP_MED"
 
 # The one step that stays manual, and not for lack of trying: tapping Inject opens
 # UIDocumentPickerViewController, which draws in another process and arrives here as an
@@ -78,7 +81,8 @@ gate "chosen?"
 # was injected at all. The log is PRINTED rather than asked about: a verdict that depends
 # on who was reading the phone is the thing this harness exists to get rid of.
 step "Read the result in View Logs"
-ios_tap_or_ask "View Logs" "open View Logs"
+ios_tap_req "View Logs" || exit 1
+nap "$NAP_NAV"
 detail "TrollFools' log, as it reads on the device:"
 ios_show_screen || detail "could not read the log from here"
 
@@ -95,6 +99,11 @@ if [ -n "$VERSION_BEFORE" ] && [ "$VERSION_BEFORE" != "$VERSION_AFTER" ]; then
 fi
 
 # --- launch --------------------------------------------------------------------
+# Re-granted: TrollFools re-signed the bundle, and a permission is tied to the signature
+# it was granted to.
+step "Grant $PKG its permissions"
+ios_grant "$PKG"
+
 # Launched, never injected into: frida inside the app under test would make its own RASP
 # report the tester's tooling, which is a worse outcome than no result at all.
 step "Open $PKG"

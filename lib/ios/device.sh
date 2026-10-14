@@ -10,18 +10,15 @@
 #   * this file  everything that does not touch the screen — the app inventory, the
 #                install and uninstall sequencing, the waiting, and the verdicts.
 #
-# The division matters because the taps are the fragile half: they reach into UIKit ivars
-# that move between iOS releases. So a tap that fails falls back to asking the operator
-# (ios_tap_or_ask) and the case still completes. Nothing in this file depends on a tap
-# having been automatic.
+# A tap that never lands stops the case with a message, as ui_tap_req does on Android.
 
 : "${DEV_SERIAL:?DEV_SERIAL not set — launch scenarios via run-scenarios.sh}"
 
 IOS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../lib/ios
 . "$IOS_LIB/../base.sh"         # shared with Android: BST_ROOT, pick_index, int_or, num_or
-# The tap layer. It calls step/detail/gate from further down this file — resolved when the
+# The tap layer. It calls step/detail from further down this file — resolved when the
 # case runs, not when this line does, so the order here is not a problem.
-. "$IOS_LIB/ui.sh"              # ios_ui_open, ios_tap_req, ios_tap_or_ask, ios_dump
+. "$IOS_LIB/ui.sh"              # ios_ui_open, ios_tap_req, ios_tap_in_list, ios_dump
 
 DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
 
@@ -41,8 +38,8 @@ DEVICECTL_TIMEOUT="$(int_or "${DEVICECTL_TIMEOUT:-60}" 60 DEVICECTL_TIMEOUT)"
 #   brew install libimobiledevice ideviceinstaller
 #
 # Every operation goes through one of these two, resolved once. A backend of "none" is not
-# fatal: the cases are gated manual flows and still run, they just lose the verification
-# between the steps, and each one says so rather than quietly skipping the check.
+# fatal: the cases still run, they just lose the verification between the steps, and each
+# one says so rather than quietly skipping the check.
 IOS_BACKEND="${IOS_BACKEND:-}"
 ios_backend() {
   [ -n "$IOS_BACKEND" ] && { printf '%s' "$IOS_BACKEND"; return 0; }
@@ -71,10 +68,14 @@ _dc_json() {   # devicectl writes structured output to a file; the human table i
 # ios_apps : "<bundleid>\t<version>" per installed app, or rc1 if it could not be read.
 # An unreadable inventory must NOT come back as an empty list — every caller would read
 # that as "the app is not installed" and act on it.
+#
+# --all, not --user: TrollStore registers what it installs as a SYSTEM app, so a --user
+# listing never shows the re-signed build case 4 puts on — and the wait for it to appear
+# ran its full five minutes and then failed an install that had worked.
 ios_apps() {
   case "$(ios_backend)" in
     imd)
-      ideviceinstaller --udid "$DEV_SERIAL" list --user 2>/dev/null \
+      ideviceinstaller --udid "$DEV_SERIAL" list --all 2>/dev/null \
         | awk -F', ' 'NR>1 && NF>=2 {
             id=$1; ver=$2; gsub(/^"|"$/, "", id); gsub(/^"|"$/, "", ver)
             if (id != "") printf "%s\t%s\n", id, ver
@@ -130,7 +131,7 @@ ios_version() {     # echo the installed version of <bundleid>, empty if absent 
 # display name, never by bundle id, so a lookup on those screens needs this.
 ios_display_name() {
   case "$(ios_backend)" in
-    imd) ideviceinstaller --udid "$DEV_SERIAL" list --user 2>/dev/null \
+    imd) ideviceinstaller --udid "$DEV_SERIAL" list --all 2>/dev/null \
            | awk -F', ' -v b="$1" 'NR>1 && $1==b {
                name=$3; gsub(/^"|"$/, "", name); print name; exit }' ;;
     *) : ;;
@@ -144,13 +145,34 @@ ios_os_version() {  # the iOS version, for the opening report. Empty when unread
   esac
 }
 
+# ios_store_name <bundleid> : the name TestFlight and the App Store list the app under —
+# iTunesMetadata's itemName, read over lockdown. It need not be the display name: an app
+# shown as "Foo" on the home screen can be "Foo Bank" in TestFlight, and a lookup by
+# display name then finds nothing.
+ios_store_name() {
+  [ "$(ios_backend)" = imd ] || return 0
+  ideviceinstaller --udid "$DEV_SERIAL" list --all --xml -a CFBundleIdentifier -a iTunesMetadata \
+      2>/dev/null | python3 -I -c '
+import plistlib, sys
+try:
+    apps = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(0)
+for app in apps:
+    if app.get("CFBundleIdentifier") == sys.argv[1] and isinstance(app.get("iTunesMetadata"), bytes):
+        try:
+            print(plistlib.loads(app["iTunesMetadata"]).get("itemName", ""))
+        except Exception:
+            pass
+        break
+' "$1"
+}
+
 ios_uninstall() {   # remove <bundleid>; quiet success when it was not there
   echo "   uninstalling $1 ..."
   case "$(ios_installed "$1"; echo $?)" in
     1) echo "   not installed — nothing to remove."; return 0 ;;
-    2) echo "   cannot read the app list, so cannot confirm what is installed." >&2
-       gate "remove $1 BY HAND in Settings, then continue?"
-       return 0 ;;
+    2) echo "   WARN: cannot read the app list — uninstalling anyway, unverified." >&2 ;;
   esac
   case "$(ios_backend)" in
     imd)       ideviceinstaller --udid "$DEV_SERIAL" uninstall "$1" >/dev/null 2>&1 || true ;;
@@ -180,20 +202,12 @@ ios_launch() {
 
 # ios_launch_checked <bundleid> : launch it and confirm it is running.
 #
-# "is it running?" was a question; the process list is a fact. The question only comes back
-# when the frida driver is down, because then nothing here can see the process list at all.
+# "is it running?" is read from the process list, never asked.
 ios_launch_checked() {
   local pkg="$1"
   ios_launch "$pkg"
-  if ios_wait_running "$pkg"; then
-    detail "running: $pkg (${IOS_UI_RESP#OK })"
-    return 0
-  fi
-  if [ "$IOS_UI_READY" = 1 ]; then
-    echo "!! $pkg did not come up — the launch request was accepted but nothing is running." >&2
-    return 1
-  fi
-  gate "is $pkg running?"      # no driver, so the process list is unreadable from here
+  ios_wait_front "$pkg" || return 1           # on screen, not merely a process
+  detail "on screen: $pkg (${IOS_UI_RESP#OK })"
 }
 
 # --- talking to the operator ---------------------------------------------------
@@ -218,24 +232,26 @@ gate() {
   done
 }
 
-# await <description> <shell-condition> : poll until the condition holds, then carry on.
+# await <description> <command> [args...] : poll until the command succeeds, then carry on.
 #
 # For the waits that are easy to get wrong by hand — a decrypt finishing, an install
 # appearing — where continuing early breaks the case. A timeout is a FAILURE, not a
 # question: "continue anyway?" produced runs whose verdict depended on whether someone
-# was feeling patient. Give a slow phone or a large app more room with AWAIT_TRIES.
+# was feeling patient. Same loop as Android's install wait (case 7's c7_wait_install):
+# sleep 2s, check, until INSTALL_TIMEOUT runs out.
+#
+# A command and its arguments, never a string to eval: the arguments carry a bundle id
+# the operator typed, and eval would run whatever was typed after a quote.
 await() {
-  local what="$1" cond="$2" tries=0 limit secs
-  limit="$(int_or "${AWAIT_TRIES:-60}" 60 AWAIT_TRIES)"
-  secs="$(num_or "${AWAIT_SLEEP:-5}" 5 AWAIT_SLEEP)"
+  local what="$1" deadline
+  shift
+  deadline=$((SECONDS + $(int_or "${INSTALL_TIMEOUT:-600}" 600 INSTALL_TIMEOUT)))
   printf '      waiting: %s\n' "$what"
-  while [ "$tries" -lt "$limit" ]; do
-    if eval "$cond"; then printf '      confirmed: %s\n' "$what"; return 0; fi
-    tries=$((tries + 1))
-    sleep "$secs"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 2
+    if "$@"; then printf '      confirmed: %s\n' "$what"; return 0; fi
   done
-  echo "!! gave up waiting for $what" >&2
-  echo "   waited ${limit} x ${secs}s; raise AWAIT_TRIES if this phone just needs longer." >&2
+  echo "!! gave up waiting for $what after ${INSTALL_TIMEOUT:-600}s (INSTALL_TIMEOUT)." >&2
   return 1
 }
 
@@ -268,7 +284,7 @@ ios_general_rules() {
     echo "             brew install libimobiledevice ideviceinstaller" >&2
     echo "           the case still runs; it just cannot check its own steps." >&2
   fi
-  ios_ui_report
+  ios_ui_report || return 1
 
   # An unreadable inventory must not be read as "not installed" — that would stop every
   # case on a device the cases can otherwise drive perfectly well.
@@ -287,26 +303,39 @@ ios_general_rules() {
   # --- the two screens, opened on the phone ------------------------------------
   # Performed, not asked and not skipped. The values below are read over lockdown, so the
   # script does not need these screens — the tester watching, and the recording, do.
+  #
+  # Each screen is CONFIRMED on the phone before the next step runs, then held for nap 3.
+  # A fixed nap alone was not enough: at DELAY_SCALE=0.5 the next app opened over
+  # TestFlight's launch screen, so the step ran and nothing was ever shown.
   step "Settings > General > About"
-  if ios_open_url "prefs:root=General&path=About"; then
-    detail "${DEV_NAME:-$DEV_SERIAL}${os:+ — iOS $os}, read over lockdown and now on screen"
-    sleep "$IOS_SHOW"
-  else
-    detail "could not open Settings from here — ${DEV_NAME:-$DEV_SERIAL}${os:+, iOS $os}"
-  fi
+  ios_open_url "prefs:root=General&path=About" || {
+    echo "!! could not open Settings > General > About ($(_ios_why))." >&2; return 1; }
+  # Capacity is a row only the About pane has, so General itself cannot pass for it.
+  ios_ui_attach com.apple.Preferences && ios_wait_for Capacity || return 1
+  detail "${DEV_NAME:-$DEV_SERIAL}${os:+ — iOS $os}, read over lockdown and now on screen"
+  nap 3
 
-  name="$(ios_display_name "$pkg")"
+  # Granted HERE, before anything can launch the app: TrollDecrypt launches it to decrypt
+  # it, and its permission chain (Bluetooth, then Notifications) landed on top of the wait
+  # for "Decryption Complete".
+  step "Grant $pkg its permissions, so no permission alert interrupts a step"
+  ios_grant "$pkg"
+
+  # Confirmed by the app's own row, "<Name>, Version <v> (<build>)", which exists only once
+  # the list has loaded. <Name> is the App Store name — TestFlight's, not the home screen's. Nothing in TestFlight is tapped — its SwiftUI rows answer no route.
+  name="$(ios_store_name "$pkg")"
+  [ -n "$name" ] || name="$(ios_display_name "$pkg")"
   step "TestFlight > ${name:-$pkg}"
-  if ios_open_or_ask com.apple.TestFlight TestFlight; then
-    # The row reads "<Name>, Version <version> (<build>)". Matching on the name AND the
-    # word Version lands on the row itself rather than the "<Name> app icon" beside it.
-    if [ -n "$name" ] && ios_tap_in_list "$name, Version"; then
-      detail "opened the TestFlight entry for $name"
-    else
-      detail "could not single out ${name:-$pkg} in the list — leaving TestFlight on Apps"
-    fi
-    sleep "$IOS_SHOW"
+  ios_ui_open com.apple.TestFlight || return 1
+  # The list first — any app's row — because TestFlight fetches it over the network and a
+  # search through a list that has not arrived yet finds nothing however far it pages.
+  ios_wait_for ", Version " || return 1
+  if [ -n "$name" ]; then
+    ios_find_in_list "$name, Version" || return 1   # paged: the app may sit below the fold
+  else
+    ios_wait_front com.apple.TestFlight || return 1
   fi
+  nap 3
 
   # The UPDATE button is deliberately NOT tapped. Every row on that screen has one, they
   # are identical, and the one belonging to this app is identified only by where it sits —

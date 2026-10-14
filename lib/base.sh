@@ -92,3 +92,51 @@ num_or() {
     *)                    printf '%s' "$1" ;;
   esac
 }
+
+# --- timing, shared by Android and iOS ----------------------------------------
+# Moved here verbatim from lib/android/common.sh so both platforms wait the same way: one
+# DELAY_SCALE, the same settle lengths, the same retry count.
+# Every knob is validated HERE, where all paths meet, rather than at the prompt that asks
+# for one of them. The runner used to check only the DELAY_SCALE it had just read from the
+# keyboard, so DELAY_SCALE=abc in the environment sailed through to awk, coerced to 0, and
+# floored every settle in every case to NAP_MIN without a word. num_or/int_or (base.sh)
+# substitute the documented default and say which knob was rejected.
+DELAY_SCALE="$(num_or "${DELAY_SCALE:-1}" 1 DELAY_SCALE)"          # global nap multiplier
+NAP_MIN="$(num_or "${NAP_MIN:-0.3}" 0.3 NAP_MIN)"                  # floor: no settle is shorter
+NAP_MAX="${NAP_MAX:-}"                   # OPTIONAL cap per settle (empty = none). See nap().
+[ -z "$NAP_MAX" ] || NAP_MAX="$(num_or "$NAP_MAX" "" NAP_MAX)"     # junk cap = no cap
+NAP_SHORT="$(num_or "${NAP_SHORT:-0.8}" 0.8 NAP_SHORT)"            # after a tap / minor settle
+NAP_MED="$(num_or "${NAP_MED:-1.2}" 1.2 NAP_MED)"                  # after typing / toggle / dialog
+NAP_NAV="$(num_or "${NAP_NAV:-1.5}" 1.5 NAP_NAV)"                  # after a screen change
+NAP_SCROLL="$(num_or "${NAP_SCROLL:-0.6}" 0.6 NAP_SCROLL)"         # after a scroll swipe
+TAP_RETRIES="$(int_or "${TAP_RETRIES:-10}" 10 TAP_RETRIES)";   [ "$TAP_RETRIES"     -lt 3  ] && TAP_RETRIES=3
+
+# nap <seconds> : the standard UI settle — max(NAP_MIN, <seconds>*DELAY_SCALE).
+# NAP_MAX can cap it, but it is OFF by default and should stay off for the Magisk
+# cases: a settle that is too short makes the NEXT ui_dump snapshot the PREVIOUS
+# screen, and the state readers (ui_checked/read_modules) then decide on stale data.
+# Retrying a tap cannot detect that, so speed here comes from DELAY_SCALE, knowingly.
+#
+# The arithmetic needs awk (bash has no floats), but DELAY_SCALE/NAP_MIN/NAP_MAX are
+# fixed for the whole run and only ~19 distinct lengths are ever asked for, so each is
+# computed once and reused. bash 3.2 ships on macOS and has no associative arrays, hence
+# a string cache.
+#
+# _scale_into assigns to $_SCALED rather than echoing, because "$(_scaled ...)" would run
+# it in a subshell and throw every cache write away with it — a memo that silently never
+# memoises. Nothing calls nap inside a command substitution, so the cache persists.
+_NAP_CACHE=""
+_SCALED=""
+_scale_into() {   # _scale_into <seconds> <cap:1|0>  ->  sets $_SCALED
+  local key="$2:$1"
+  case "$_NAP_CACHE" in
+    *" $key="*) _SCALED="${_NAP_CACHE#*" $key="}"; _SCALED="${_SCALED%% *}"; return 0 ;;
+  esac
+  _SCALED=$(awk -v s="$1" -v scale="$DELAY_SCALE" -v lo="$NAP_MIN" -v cap="$NAP_MAX" -v docap="$2" \
+    'BEGIN{v=s*scale; if(v<lo)v=lo; c=cap+0; if(docap&&c>0&&v>c)v=c; printf "%.3f", v}')
+  _NAP_CACHE="$_NAP_CACHE $key=$_SCALED"
+}
+nap() { _scale_into "$1" 1; sleep "$_SCALED"; }
+# nap_long <seconds> : for waits that are NOT a UI settle and must not be capped —
+# a reboot handshake, keyguard coming back, another app's manager starting up.
+nap_long() { _scale_into "$1" 0; sleep "$_SCALED"; }

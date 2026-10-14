@@ -35,20 +35,7 @@ LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../lib/android (its pyt
 MOD_LSPOSED="${MOD_LSPOSED:-Zygisk - LSPosed}"
 MOD_ZNEXT="${MOD_ZNEXT:-Zygisk Next}"
 
-# --- tunable delays (seconds) -------------------------------------------------
-# Every knob is validated HERE, where all paths meet, rather than at the prompt that asks
-# for one of them. The runner used to check only the DELAY_SCALE it had just read from the
-# keyboard, so DELAY_SCALE=abc in the environment sailed through to awk, coerced to 0, and
-# floored every settle in every case to NAP_MIN without a word. num_or/int_or (base.sh)
-# substitute the documented default and say which knob was rejected.
-DELAY_SCALE="$(num_or "${DELAY_SCALE:-1}" 1 DELAY_SCALE)"          # global nap multiplier
-NAP_MIN="$(num_or "${NAP_MIN:-0.3}" 0.3 NAP_MIN)"                  # floor: no settle is shorter
-NAP_MAX="${NAP_MAX:-}"                   # OPTIONAL cap per settle (empty = none). See nap().
-[ -z "$NAP_MAX" ] || NAP_MAX="$(num_or "$NAP_MAX" "" NAP_MAX)"     # junk cap = no cap
-NAP_SHORT="$(num_or "${NAP_SHORT:-0.8}" 0.8 NAP_SHORT)"            # after a tap / minor settle
-NAP_MED="$(num_or "${NAP_MED:-1.2}" 1.2 NAP_MED)"                  # after typing / toggle / dialog
-NAP_NAV="$(num_or "${NAP_NAV:-1.5}" 1.5 NAP_NAV)"                  # after a screen change
-NAP_SCROLL="$(num_or "${NAP_SCROLL:-0.6}" 0.6 NAP_SCROLL)"         # after a scroll swipe
+# --- tunable delays (seconds) — DELAY_SCALE, NAP_*, TAP_RETRIES and nap() live in base.sh
 NAP_LSPOSED="$(num_or "${NAP_LSPOSED:-3}" 3 NAP_LSPOSED)"          # LSPosed manager opening
 MAGISK_WATCH_ALWAYS="$(int_or "${MAGISK_WATCH_ALWAYS:-0}" 0 MAGISK_WATCH_ALWAYS)"  # 1 = settle watch on EVERY open
 MAGISK_WATCH_ARMED=0                     # runtime: set by reboot_wait, cleared after a clean open
@@ -59,38 +46,7 @@ OPEN_SETTLE="$(int_or "${OPEN_SETTLE:-3}" 3 OPEN_SETTLE)";     [ "$OPEN_SETTLE" 
 SETTLE_NEED="$(int_or "${SETTLE_NEED:-20}" 20 SETTLE_NEED)";   [ "$SETTLE_NEED"     -lt 6  ] && SETTLE_NEED=6
 SETTLE_MAX="$(int_or "${SETTLE_MAX:-200}" 200 SETTLE_MAX)"
 BOOT_POLL="$(int_or "${BOOT_POLL:-2}" 2 BOOT_POLL)";           [ "$BOOT_POLL"       -lt 1  ] && BOOT_POLL=1
-TAP_RETRIES="$(int_or "${TAP_RETRIES:-10}" 10 TAP_RETRIES)";   [ "$TAP_RETRIES"     -lt 3  ] && TAP_RETRIES=3
 MAGISK_FG_TRIES="$(int_or "${MAGISK_FG_TRIES:-40}" 40 MAGISK_FG_TRIES)"; [ "$MAGISK_FG_TRIES" -lt 10 ] && MAGISK_FG_TRIES=10
-
-# nap <seconds> : the standard UI settle — max(NAP_MIN, <seconds>*DELAY_SCALE).
-# NAP_MAX can cap it, but it is OFF by default and should stay off for the Magisk
-# cases: a settle that is too short makes the NEXT ui_dump snapshot the PREVIOUS
-# screen, and the state readers (ui_checked/read_modules) then decide on stale data.
-# Retrying a tap cannot detect that, so speed here comes from DELAY_SCALE, knowingly.
-#
-# The arithmetic needs awk (bash has no floats), but DELAY_SCALE/NAP_MIN/NAP_MAX are
-# fixed for the whole run and only ~19 distinct lengths are ever asked for, so each is
-# computed once and reused. bash 3.2 ships on macOS and has no associative arrays, hence
-# a string cache.
-#
-# _scale_into assigns to $_SCALED rather than echoing, because "$(_scaled ...)" would run
-# it in a subshell and throw every cache write away with it — a memo that silently never
-# memoises. Nothing calls nap inside a command substitution, so the cache persists.
-_NAP_CACHE=""
-_SCALED=""
-_scale_into() {   # _scale_into <seconds> <cap:1|0>  ->  sets $_SCALED
-  local key="$2:$1"
-  case "$_NAP_CACHE" in
-    *" $key="*) _SCALED="${_NAP_CACHE#*" $key="}"; _SCALED="${_SCALED%% *}"; return 0 ;;
-  esac
-  _SCALED=$(awk -v s="$1" -v scale="$DELAY_SCALE" -v lo="$NAP_MIN" -v cap="$NAP_MAX" -v docap="$2" \
-    'BEGIN{v=s*scale; if(v<lo)v=lo; c=cap+0; if(docap&&c>0&&v>c)v=c; printf "%.3f", v}')
-  _NAP_CACHE="$_NAP_CACHE $key=$_SCALED"
-}
-nap() { _scale_into "$1" 1; sleep "$_SCALED"; }
-# nap_long <seconds> : for waits that are NOT a UI settle and must not be capped —
-# a reboot handshake, keyguard coming back, another app's manager starting up.
-nap_long() { _scale_into "$1" 0; sleep "$_SCALED"; }
 
 adbx() { command adb -s "$DEV_SERIAL" "$@"; }
 

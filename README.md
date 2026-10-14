@@ -43,15 +43,15 @@ from inside the tool it is driving.
 
 Needs a jailbroken iPhone running frida-server, a python that can `import frida`, and
 `libimobiledevice` for the app inventory (`brew install libimobiledevice ideviceinstaller`).
-Without the frida half the cases still run end to end — each step asks for the tap instead
-of making it, and says why.
+Timing and retries are Android's own code (`nap`, `DELAY_SCALE`, `NAP_*`, `TAP_RETRIES`
+in `lib/base.sh`), and a tap that never lands stops the case the way `ui_tap_req` does.
 
 Nothing an iOS case can read is asked about. The model and iOS version arrive over
 lockdown, the installed build is read from the inventory (and checked against
 `EXPECT_VERSION` when you set it), a launch is confirmed against the process list, and
 TrollFools' injection log is printed into the run output rather than put to the operator as
-"does this look right?". The only question left in a healthy run is the file picker, which
-belongs to another process — see below.
+"does this look right?". The only question left in a healthy run is case 5's file picker,
+which belongs to another process — see below.
 
 Cases 1–3 are declarative — `apply_state <modules> <enforce-denylist> <target-in-denylist>`.
 A shared engine reads the current Magisk state, changes only what differs, reboots only when
@@ -111,12 +111,11 @@ Useful environment variables:
 | `TARGET_PREFIX` | **required** package namespace for the app list — asked until given, so no client prefix lives in the repo. The run stops if nothing matches it |
 | `MOD_ZNEXT` / `MOD_LSPOSED` | the module titles as the Modules screen shows them, for cases 1–3 |
 | `SKIP_PREFLIGHT` | skip the dependency checks |
-| `IOS_TAP_RETRIES` / `IOS_TAP_SLEEP` | how long an iOS lookup waits for an element to appear |
-| `IOS_SCROLL_PAGES` | how far to page an iOS list looking for a row (default 20) |
+| `TAP_RETRIES` | attempts before a required tap gives up, on **both** platforms (default 10, `NAP_SHORT` apart) |
 | `IOS_PY` | a python that can `import frida`, if the search for one misses it |
 | `TROLLFOOLS_SCOPE` | which TrollFools tab lists the app under test: `All`, `User`, `TrollStore`, `System` |
 | `EXPECT_VERSION` | the build an iOS case is meant to test — the run stops if the phone holds another one |
-| `AWAIT_TRIES` / `AWAIT_SLEEP` | how long an iOS case waits for a decrypt or an install before giving up |
+| `INSTALL_TIMEOUT` | seconds an iOS case waits for a decrypt or an install (checked every 2s, like Android case 7). Default 600 |
 
 Every case ends by offering to launch the app again (`open <pkg> again? [y/N]`), as
 often as you like. Detection can hinge on a cold start or on what the app cached last
@@ -205,9 +204,12 @@ exposed as accessibility elements instead, so a view-only walk saw TrollFools' a
 182 views of which 17 said anything. The elements say `"Name, bundle.id, version"`, which is
 how a row is found by bundle id rather than by display name.
 
-Two limits are real. A file picker is a `UIDocumentPickerViewController` — a remote view
+Three limits are real. A file picker is a `UIDocumentPickerViewController` — a remote view
 belonging to another process — so nothing inside the app can touch it; those steps ask for
-the tap and say why. And the app under test is only ever **launched**, never injected into:
+the tap and say why. A share sheet draws a third-party app's name out of process, so
+"TrollStore" is never text the app holds: case 4 taps the cell by what it does (hand the
+file to an app) and then confirms TrollStore is the app that came to the front. And the
+app under test is only ever **launched**, never injected into:
 frida inside it would make its own RASP report the tester's tooling, which is worse than no
 result at all.
 

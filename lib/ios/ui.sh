@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ui.sh — real taps on an iOS device. Sourced by device.sh; needs step/detail/gate from it.
+# ui.sh — real taps on an iOS device. Sourced by device.sh; needs step/detail from it.
 #
 # WHY FRIDA AND NOT XCUITEST
 # Apple's way to drive an iOS app is XCUITest, which needs testmanagerd to authorise the
@@ -9,17 +9,14 @@
 # authorisation. On a jailbroken device frida is already inside the process and reads UIKit
 # directly — no certificate, no Apple tooling, nothing of anyone else's to sign with.
 #
-# The price is honest: lib/ios/js/uitree.js invokes the handler a touch would have reached
-# (control action, tap recogniser, segment selection) rather than synthesising a touch, and
-# it reaches into UIKit ivars whose names are iOS-16-specific. So every tap here degrades
-# to the manual instruction it replaced instead of failing the case — see ios_tap_or_ask.
+# lib/ios/js/uitree.js invokes the handler a touch would have reached (control action, tap
+# recogniser, segment selection) rather than synthesising a touch.
 #
-#   env: IOS_TAP_RETRIES=6   how many times to look for an element before giving up
-#        IOS_TAP_SLEEP=1.5   seconds between those attempts
-#        IOS_SCROLL_PAGES=20 how many pages to page through when looking for a list row
-#        IOS_SHOW=3          seconds to leave a screen up so it can be read, or recorded
-#        IOS_SETTLE=3.5      seconds to let a freshly spawned app draw (read by iosdriver.py)
-#        IOS_PY=<python>     a python that can `import frida`, if the search misses it
+# TIMING is Android's, not a copy of it: nap, DELAY_SCALE, NAP_* and TAP_RETRIES come from
+# base.sh, the same code lib/android/common.sh uses. ios_tap_req is ui_tap_req — retry
+# TAP_RETRIES times with NAP_SHORT between, then stop the case with a message.
+#
+#   env: IOS_PY=<python>     a python that can `import frida`, if the search misses it
 
 [ -n "${BST_IOS_UI_SOURCED:-}" ] && return 0
 BST_IOS_UI_SOURCED=1
@@ -27,11 +24,6 @@ BST_IOS_UI_SOURCED=1
 IOS_UI_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$IOS_UI_LIB/../base.sh"               # shared with Android: BST_ROOT, FRIDAENV, int_or, num_or
 
-IOS_TAP_RETRIES="$(int_or "${IOS_TAP_RETRIES:-6}" 6 IOS_TAP_RETRIES)"
-IOS_TAP_SLEEP="$(num_or "${IOS_TAP_SLEEP:-1.5}" 1.5 IOS_TAP_SLEEP)"
-IOS_SCROLL_PAGES="$(int_or "${IOS_SCROLL_PAGES:-20}" 20 IOS_SCROLL_PAGES)"
-# A performed step has to stay on screen long enough to be seen — these runs get recorded.
-IOS_SHOW="$(num_or "${IOS_SHOW:-3}" 3 IOS_SHOW)"
 IOS_TREE="${TMPDIR:-/tmp}/bst-ios-tree.txt"       # where a failed lookup leaves the tree
 
 # --- the driver process --------------------------------------------------------
@@ -96,7 +88,7 @@ ios_ui_start() {
 
 # _ios_cmd <seconds> <verb> [argument...] : one command, one reply, left in IOS_UI_RESP.
 # A timeout is not survivable: a late reply would be read as the answer to the NEXT
-# command, so the driver is torn down and the rest of the case falls back to manual steps.
+# command, so the driver is torn down and the next tap stops the case.
 _ios_cmd() {
   local secs="$1"; shift
   ios_ui_start || return 1
@@ -119,9 +111,20 @@ _ios_why() {   # the best available explanation of the last failure, for one log
 # ios_ui_open <bundleid> : spawn the app and inject. Spawn rather than attach, because iOS
 # freezes a backgrounded app and an injection into a frozen process never completes.
 # Re-opening the app already open is a no-op, so a case can call this before every step.
+# Then nap 2.5, as mt_launch_fresh does after launching MT Manager.
 ios_ui_open() {
   [ "$IOS_UI_READY" = 1 ] && [ "$IOS_UI_APP" = "$1" ] && return 0
-  _ios_cmd "$(int_or "${IOS_OPEN_TIMEOUT:-120}" 120)" open "$1" || return 1
+  _ios_cmd "$(int_or "${IOS_OPEN_TIMEOUT:-120}" 120)" open "$1" || {
+    echo "  !! could not open $1: $(_ios_why)" >&2; return 1; }
+  IOS_UI_APP="$1"
+  nap 2.5
+}
+
+# ios_ui_attach <bundleid> : inject into the app as it is, no restart. For an app that
+# another app just brought up with something to show — TrollStore, handed an IPA.
+ios_ui_attach() {
+  _ios_cmd "$(int_or "${IOS_OPEN_TIMEOUT:-120}" 120)" attach "$1" || {
+    echo "  !! could not attach to $1: $(_ios_why)" >&2; return 1; }
   IOS_UI_APP="$1"
 }
 
@@ -139,6 +142,40 @@ ios_scroll() { _ios_cmd 60 scroll "${1:-down}"; }
 # with a URL. Opened by the device itself, with nothing injected anywhere.
 ios_open_url() { _ios_cmd 60 url "$1"; }
 
+# --- the file picker, which is a different process ----------------------------
+# A document picker belongs to com.apple.DocumentManager.Service, not to the app that
+# opened it — the app holds an empty _UIRemoteView and can neither see nor touch it. The
+# driver can attach there directly, and once it has, every helper below (ios_find,
+# ios_tap, ios_dump, ios_scroll, ios_tap_req) acts on the picker instead, because they
+# all go through the same target. Switch back with ios_use_app.
+IOS_PICKER_PROC="${IOS_PICKER_PROC:-com.apple.DocumentManager.Service}"
+
+# ios_use_picker : wait for the picker to come up, then aim at it.
+# The service is spawned when the picker opens, so the first attempt is usually too early.
+ios_use_picker() {
+  local i
+  for (( i=1; i<=TAP_RETRIES; i++ )); do
+    _ios_cmd 60 service "$IOS_PICKER_PROC" && return 0
+    [ "$IOS_UI_READY" = 1 ] || break
+    nap "$NAP_SHORT"
+  done
+  echo "      the file picker never appeared: $(_ios_why)" >&2
+  return 1
+}
+
+ios_use_app() { _ios_cmd 60 service app; }
+
+# ios_in_picker <text> : tap something inside the picker, then hand
+# the driver back to the app whatever happens — leaving it aimed at a dismissed picker
+# would make every later step look for things in the wrong process.
+ios_in_picker() {
+  local rc=0
+  ios_use_picker || return 1
+  ios_tap_req "$@" || rc=$?
+  ios_use_app >/dev/null 2>&1 || true
+  return "$rc"
+}
+
 # ios_running <bundleid> : rc0 when the app is running, and IOS_UI_RESP has its pid.
 # Nothing is injected — this only reads the device's process list.
 ios_running() { _ios_cmd 30 running "$1"; }
@@ -146,12 +183,55 @@ ios_running() { _ios_cmd 30 running "$1"; }
 # ios_wait_running <bundleid> : the same, given a few seconds to come up.
 ios_wait_running() {
   local i
-  for (( i=1; i<=IOS_TAP_RETRIES; i++ )); do
+  for (( i=1; i<=TAP_RETRIES; i++ )); do
     ios_running "$1" && return 0
     [ "$IOS_UI_READY" = 1 ] || return 1
-    sleep "$IOS_TAP_SLEEP"
+    nap "$NAP_SHORT"
   done
   return 1
+}
+
+# ios_wait_front <bundleid> : wait until that app is the one on screen. Android's
+# wait_magisk_fg: check, sleep 0.5, up to 40 times. A launch request returns as soon as the
+# process exists, which at DELAY_SCALE=0.5 was before the app had drawn anything — the
+# step "showed" TestFlight and the next one opened another app over its launch screen.
+ios_wait_front() {
+  local n=0
+  until _ios_cmd 30 front "$1"; do
+    [ "$IOS_UI_READY" = 1 ] || break
+    sleep 0.5; n=$((n+1)); [ "$n" -gt 40 ] && break
+  done
+  [ "${IOS_UI_RESP%% *}" = OK ] && return 0
+  echo "  !! $1 never came to the front ($(_ios_why))" >&2
+  return 1
+}
+
+# ios_wait_for <text> : wait until the screen shows it — the UI a step is meant to put up,
+# confirmed before the next step runs. Android's wait_magisk_fg loop: look, sleep 0.5, up
+# to 40 times. NOT scaled by DELAY_SCALE: what is awaited is a screen loading — TestFlight
+# fetches its list over the network — and that is no faster at DELAY_SCALE=0.5.
+ios_wait_for() {
+  local n=0
+  until ios_find "$@"; do
+    [ "$IOS_UI_READY" = 1 ] || break
+    sleep 0.5; n=$((n+1)); [ "$n" -gt 40 ] && break
+  done
+  [ "${IOS_UI_RESP%% *}" = OK ] && return 0
+  echo "  !! expected screen not shown: $* ($(_ios_why))" >&2
+  return 1
+}
+
+# ios_grant <bundleid> : grant the app every permission it declares, so no permission
+# alert ever lands on top of a step. Done by a hidden copy of Settings: nothing changes on
+# screen, and the app under test itself is never injected. Best effort, like ui_tap_when:
+# a permission it could not grant costs an alert on screen, not the case.
+ios_grant() {
+  if _ios_cmd 60 grant "$1"; then
+    detail "granted: ${IOS_UI_RESP#OK }"
+  else
+    echo "  WARN: permissions for $1: $(_ios_why)" >&2
+  fi
+  return 0
 }
 
 # ios_show_screen [pattern] : put what is on screen INTO THE RUN OUTPUT.
@@ -177,17 +257,16 @@ ios_show_screen() {
   ' "$IOS_TREE"
 }
 
-# ios_tap_req <text> : look for the element until it appears, then tap it. rc1 with a
-# message when it never does — the strict helper, same contract as ui_tap_req on Android.
+# ios_tap_req <text> : Android's ui_tap_req. Up to TAP_RETRIES attempts, nap NAP_SHORT
+# between them, rc1 with a message when the element never appears.
 ios_tap_req() {
   local i
-  for (( i=1; i<=IOS_TAP_RETRIES; i++ )); do
+  for (( i=1; i<=TAP_RETRIES; i++ )); do
     ios_tap "$@" && return 0
-    # A driver that has been torn down will not come back within this case; stop looping.
-    [ "$IOS_UI_READY" = 1 ] || break
-    sleep "$IOS_TAP_SLEEP"
+    [ "$IOS_UI_READY" = 1 ] || break     # a dead driver will not come back this case
+    nap "$NAP_SHORT"
   done
-  echo "      could not tap '$*': $(_ios_why)" >&2
+  echo "  !! required element not found after retries: $* ($(_ios_why))" >&2
   return 1
 }
 
@@ -197,62 +276,42 @@ ios_tap_req() {
 # accessibility element — so "not on screen" is the normal state for one app among forty,
 # not a failure. Separate from ios_tap_req on purpose: scrolling while waiting for an
 # alert to appear would move the list underneath it for nothing.
-ios_tap_in_list() {
-  local i why
-  ios_scroll top >/dev/null 2>&1 || true        # start from a known end of the list
-  ios_tap "$@" && return 0
-  why="$(_ios_why)"                             # why the TAP failed, before a scroll overwrites it
-  for (( i=1; i<=IOS_SCROLL_PAGES; i++ )); do
-    ios_scroll down || break                    # rc1 means the list stopped moving
-    ios_tap "$@" && return 0
-    why="$(_ios_why)"
+#
+# Paged like Android's read_modules: a fixed number of pages, nap NAP_SCROLL after each.
+# Up to three passes, NAP_NAV apart: a list that is still loading — TrollStore's, right
+# after an install — has no row to find on the first pass, and that is a wait, not a miss.
+ios_tap_in_list()  { _ios_in_list ios_tap "$@"; }
+# ios_find_in_list <text> : the same paging, to CONFIRM a row is there without tapping it.
+ios_find_in_list() { _ios_in_list ios_find "$@"; }
+
+_ios_in_list() {
+  local act="$1" i pass why=""
+  shift
+  for (( pass=1; pass<=3; pass++ )); do
+    [ "$pass" = 1 ] || nap "$NAP_NAV"
+    ios_scroll top >/dev/null 2>&1 || true      # start from a known end of the list
+    "$act" "$@" && return 0
+    why="$(_ios_why)"                           # why it failed, before a scroll overwrites it
+    [ "$IOS_UI_READY" = 1 ] || break
+    for (( i=1; i<=20; i++ )); do
+      ios_scroll down || break                  # rc1 means the list stopped moving
+      nap "$NAP_SCROLL"
+      "$act" "$@" && return 0
+      why="$(_ios_why)"
+    done
   done
-  echo "      '$*' is nowhere in the list: $why" >&2
+  echo "  !! required element not found in the list: $* ($why)" >&2
   return 1
 }
 
-# THE two helpers the cases use: tap it if the driver can, otherwise print what to do and
-# gate on it. Not every widget in these flows is proven — a segmented control, a menu entry
-# and a SwiftUI row are, a UIAlertController button is not — and TrollStore's file picker
-# is a remote view belonging to another process, which nothing in here can reach. A harness
-# whose job is to verify an app's defences must not become unrunnable because one button
-# resisted, so a failed tap costs the operator a tap, not the case.
-_ios_or_ask() {
-  sleep "$IOS_TAP_SLEEP"
-  local finder="$1" needle="$2" manual="${3:-tap \"$2\"}"
-  if "$finder" "$needle"; then
-    detail "tapped \"$needle\" (${IOS_UI_RESP#OK })"
-    return 0
-  fi
-  if [ "$IOS_UI_READY" = 1 ] && ios_dump; then
-    detail "what is on screen is in $IOS_TREE (${IOS_UI_RESP#OK } entries)"
-  fi
-  gate "$manual BY HAND, then continue?"
-}
-ios_tap_or_ask() { _ios_or_ask ios_tap_req "$@"; }      # a button, an alert, a menu entry
-ios_row_or_ask() { _ios_or_ask ios_tap_in_list "$@"; }  # a row in a long list
-
-# ios_open_or_ask <bundleid> [name] : restart the app with frida inside it, so the taps
-# that follow can reach it. Only ever used on the TOOLS — never on the app under test,
-# whose own RASP would then report the frida the tester injected.
-ios_open_or_ask() {
-  local bundle="$1" name="${2:-$1}"
-  if ios_ui_open "$bundle"; then
-    detail "opened $name (${IOS_UI_RESP#OK })"
-    return 0
-  fi
-  detail "could not open $name from here: $(_ios_why)"
-  gate "open $name BY HAND, then continue?"
-}
-
-# ios_ui_report : one line, in the opening report, so the operator knows up front whether
-# this run taps for itself or asks. Printed once per case.
+# ios_ui_report : one line in the opening report. rc1 when the driver cannot start —
+# every step taps, so a case without one stops here instead of at its first tap.
 ios_ui_report() {
   printf '  taps:    '
   if ios_ui_start; then
     printf 'automatic — frida drives the UI\n'
-  else
-    printf 'MANUAL — %s\n' "$IOS_UI_WHY"
-    printf '           every step still runs; it asks you to tap instead.\n'
+    return 0
   fi
+  printf 'UNAVAILABLE — %s\n' "$IOS_UI_WHY"
+  return 1
 }

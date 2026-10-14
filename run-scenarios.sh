@@ -261,11 +261,10 @@ if [ -n "$TARGET_PKG" ]; then
 fi
 
 # --- 6) run -------------------------------------------------------------------
-# Keyguard handling is an Android concern; iOS cases are driven by hand on an unlocked
-# phone, and there is no way to read or dismiss the iOS lock screen from here anyway.
-if [ "$PLATFORM" != ios ]; then
-  ensure_device_unlocked || exit 1
-fi
+# Android refuses to start against a locked screen: every scenario drives the UI, and a
+# locked phone turns that into a silent nothing. iOS is not checked — the PIN cannot be
+# typed from here, and waiting on the operator to unlock is what left runs stuck.
+[ "$PLATFORM" = ios ] || ensure_device_unlocked || exit 1
 echo
 echo ">> running $(basename "$TARGET")  on  ${DEV_NAME:-$DEV_SERIAL}  target=${TARGET_PKG:-none}"
 echo

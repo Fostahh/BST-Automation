@@ -11,6 +11,8 @@
 #           launch <bundleid>  bring the app up WITHOUT injecting anything into it
 #           running <bundleid> is it running? (its pid, or ERR) — nothing is injected
 #           url <url>          open a URL on the device (prefs:, itms-beta:, …)
+#           state              is the screen on and unlocked?
+#           service <name|app> point find/tap/dump at another process, or back at the app
 #           find   <text>      how many visible views say <text>
 #           scroll down|up|top page the list; ERR when it did not move
 #           tap    <text>      tap the first one that responds
@@ -40,7 +42,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The COMPILED bundle, not uitree.js: frida 17 dropped the ObjC bridge from its script
 # runtime, so the script carries its own copy.  cd lib/ios/js && npm run build
 SCRIPT = os.path.join(HERE, os.pardir, "js", "uitree.bundle.js")
-SETTLE = float(os.environ.get("IOS_SETTLE", "3.5"))
 
 
 def out(line):
@@ -58,33 +59,22 @@ def one_line(text):
 # TrollStore-installed app — the process is killed the moment it resumes. Attaching to a
 # RUNNING app is fine, so the only problem is getting it running and foregrounded.
 #
-# The obvious route is SBSLaunchApplicationWithIdentifier, called from inside SpringBoard.
-# It works, and it cost a Safe Mode: injecting frida's agent into SpringBoard and
-# unloading it again, once per launch, eventually crashes it, and the jailbreak's tweak
-# loader catches that crash by disabling injection until the user taps Exit Safe Mode.
-# SpringBoard is the one process on the phone that must not be experimented with.
+# frida is NEVER injected into SpringBoard. Measured 2026-10-14: after frida detaches, the
+# process keeps a stale exception-unwinding hook into frida's unmapped code, so the next
+# ObjC exception thrown there — even one the code would have caught, like accessibility's
+# safeValueForKey: — jumps into nothing and crashes it. In SpringBoard that is a respring
+# minutes after the script has gone, and two of those is Safe Mode. Settings crashed the
+# same way. No script is small enough to be safe there.
 #
 # uiopen is the jailbreak's own command for this — part of uikittools, on every Procursus
 # bootstrap — and frida-server runs as root, so it can simply be executed. Nothing is
 # injected anywhere: a separate short-lived process asks SpringBoard to open the app
-# through the supported path. The in-SpringBoard route stays as a fallback for a bootstrap
-# that does not ship it, and is used at most once per run.
+# through the supported path.
+# Settings' own executable, spawned by path for `grant` — see Driver.grant.
+PREFERENCES = "/Applications/Preferences.app/Preferences"
+
 UIOPEN_PATHS = ("/var/jb/usr/bin/uiopen", "/usr/bin/uiopen", "/var/jb/usr/local/bin/uiopen")
 
-SB_LAUNCHER = """
-rpc.exports.launch = function (bundle) {
-  const sbs = Process.findModuleByName('SpringBoardServices');
-  if (sbs === null) return 'SpringBoardServices is not loaded in SpringBoard';
-  const sym = sbs.findExportByName('SBSLaunchApplicationWithIdentifier');
-  if (sym === null) return 'SBSLaunchApplicationWithIdentifier is gone from this iOS';
-  const cfstr = new NativeFunction(
-    Module.getGlobalExportByName('CFStringCreateWithCString'),
-    'pointer', ['pointer', 'pointer', 'uint32']);
-  const id = cfstr(NULL, Memory.allocUtf8String(bundle), 0x08000100);  // UTF-8
-  const rc = new NativeFunction(sym, 'int', ['pointer', 'bool'])(id, 0);
-  return rc === 0 ? 'ok' : 'SBSLaunchApplicationWithIdentifier returned ' + rc;
-};
-"""
 
 
 class Driver:
@@ -94,7 +84,9 @@ class Driver:
         self.session = None
         self.script = None
         self.bundle = None
-        self.sb = None                       # the SpringBoard fallback session
+        self.service = None                  # a second UI process, e.g. the file picker
+        self.service_session = None
+        self.target = None                   # whichever of the two find/tap act on
         self._uiopen = None                  # the uiopen path, False once it is ruled out
 
     def close(self):
@@ -122,7 +114,7 @@ class Driver:
                 return True
             except Exception:
                 continue
-        self._uiopen = False                 # no bootstrap uiopen; fall back to SpringBoard
+        self._uiopen = False                 # no bootstrap uiopen
         return False
 
     def uiopen(self, bundle):
@@ -131,18 +123,6 @@ class Driver:
 
     def _open_url(self, target):
         return self._run_uiopen([target])
-
-    def springboard(self):
-        if self.sb is not None:
-            return self.sb
-        procs = [p for p in self.device.enumerate_processes() if p.name == "SpringBoard"]
-        if not procs:
-            raise RuntimeError("SpringBoard is not running - is the screen on?")
-        session = self.device.attach(procs[0].pid)
-        script = session.create_script(SB_LAUNCHER, runtime="v8")
-        script.load()
-        self.sb = script
-        return script
 
     def launch(self, bundle, restart=False):
         """Foreground the app. rc is its pid. Nothing of ours goes inside it."""
@@ -162,18 +142,7 @@ class Driver:
                     break
                 time.sleep(0.25)
         if not self.uiopen(bundle):
-            answer = None
-            for attempt in range(3):
-                try:
-                    answer = self.springboard().exports_sync.launch(bundle)
-                except frida.InvalidOperationError:
-                    self.sb = None           # a respring invalidates the cached session
-                    answer = self.springboard().exports_sync.launch(bundle)
-                if answer == "ok":
-                    break
-                time.sleep(1.0)
-            if answer != "ok":
-                raise RuntimeError(answer)
+            raise RuntimeError("uiopen is not on this bootstrap (apt install uikittools)")
         for _ in range(30):                  # it is in the process list within a second
             time.sleep(0.5)
             pid = self.app_pid(bundle)
@@ -181,17 +150,33 @@ class Driver:
                 return pid
         raise RuntimeError("%s did not come up after the launch request" % bundle)
 
-    def open(self, bundle):
+    def open(self, bundle, restart=True):
         self.close()
-        # Restart rather than foreground: a tool left on some sub-screen from an earlier
-        # run would answer the first lookup from the wrong screen.
-        pid = self.launch(bundle, restart=True)
+        self.target = None                   # a picker from a previous app is not ours
+        if restart:
+            # Restart rather than foreground: a tool left on some sub-screen from an
+            # earlier run would answer the first lookup from the wrong screen.
+            pid = self.launch(bundle, restart=True)
+        else:
+            # `attach`: something else brought the app up — a share sheet handing it a
+            # file — and a restart would throw away the very screen that hand-off opened.
+            # Wait for it to be IN FRONT, not merely running: TrollStore sat suspended in
+            # the background while the share sheet copied a 42 MB IPA into it, and an
+            # injection into a suspended app never completes — the attach just hung.
+            pid = 0
+            for _ in range(60):
+                front = self.device.get_frontmost_application()
+                if front is not None and front.identifier == bundle:
+                    pid = front.pid
+                    break
+                time.sleep(0.5)
+            if not pid:
+                raise RuntimeError("%s did not come to the front within 30s" % bundle)
         self.session = self.device.attach(pid)
         with open(SCRIPT) as handle:
             self.script = self.session.create_script(handle.read(), runtime="v8")
         self.script.load()
         self.bundle = bundle
-        time.sleep(SETTLE)                 # let the first screen draw before any lookup
         # Probe, so an app that dies on injection says so HERE. Without it the failure
         # surfaces as a mystery at the first tap, several steps later.
         try:
@@ -201,10 +186,37 @@ class Driver:
             raise RuntimeError("%s terminated when frida injected into it" % bundle)
         return "OK pid=%d views=%d" % (pid, views)
 
+    # A file picker is not part of the app that opened it: it runs in
+    # com.apple.DocumentManager.Service, and nothing inside the app can see or touch it —
+    # the app holds only an empty _UIRemoteView. Attaching to that process directly makes
+    # it an ordinary target: same walk, same tap routes. `service app` points back.
+    def use_service(self, name):
+        if name in ("app", "none", "-"):
+            self.target = None
+            if self.service is not None:
+                try:
+                    self.service_session.detach()
+                except Exception:
+                    pass
+                self.service = self.service_session = None
+            return "OK app"
+        procs = [p for p in self.device.enumerate_processes() if p.name == name]
+        if not procs:
+            raise RuntimeError("%s is not running - is that screen actually open?" % name)
+        session = self.device.attach(procs[-1].pid)
+        with open(SCRIPT) as handle:
+            script = session.create_script(handle.read(), runtime="v8")
+        script.load()
+        self.service_session = session
+        self.service = self.target = script
+        views = len(script.exports_sync.dump().get("views", []))
+        return "OK pid=%d views=%d" % (procs[-1].pid, views)
+
     def call(self, name, *args):
-        if self.script is None:
+        script = self.target or self.script
+        if script is None:
             raise RuntimeError("no app open - send `open <bundleid>` first")
-        result = getattr(self.script.exports_sync, name)(*args)
+        result = getattr(script.exports_sync, name)(*args)
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(result["error"])
         return result
@@ -250,8 +262,13 @@ class Driver:
                 or node.get("cls", ""))
 
     def find(self, needle):
-        _, hits, mode = self.resolve(needle)
-        return "OK %d %s" % (len(hits), mode)
+        """Is it on screen at all. Ambiguity is a TAP's problem — waiting for "any row of
+        this list" must succeed precisely because there are many."""
+        for mode in ("equals", "contains"):
+            hits = self.call("find", {mode: needle}).get("matches", [])
+            if hits:
+                return "OK %d %s" % (len(hits), "exact" if mode == "equals" else "substring")
+        raise RuntimeError("nothing on screen says '%s'" % needle)
 
     def tap(self, needle):
         want, hits, mode = self.resolve(needle)
@@ -269,6 +286,51 @@ class Driver:
         if not self._open_url(target):
             raise RuntimeError("uiopen is not on this bootstrap, so a URL cannot be opened")
         return "OK %s" % target
+
+    def grant(self, bundle):
+        """Grant <bundle> every permission it declares, from a HIDDEN copy of Settings.
+
+        Settings holds the entitlements to change another app's permissions. Spawned by
+        path — posix_spawn, not a launch through SpringBoard — it never gets a scene, and
+        `hold` parks it before UIApplicationMain, so nothing appears and the app in front
+        stays in front. Killed when done: the real Settings is never touched, and nothing
+        frida leaves behind outlives this call."""
+        pid = self.device.spawn([PREFERENCES])
+        result = {}
+        try:
+            session = self.device.attach(pid)
+            with open(SCRIPT) as handle:
+                script = session.create_script(handle.read(), runtime="v8")
+            script.load()
+            script.exports_sync.hold()
+            self.device.resume(pid)
+            for _ in range(20):              # its frameworks are up within a moment
+                time.sleep(0.5)
+                result = script.exports_sync.grant(bundle)
+                if not result.get("notReady"):
+                    break
+        finally:
+            try:
+                self.device.kill(pid)
+            except Exception:
+                pass
+        if result.get("notReady"):
+            raise RuntimeError("the hidden Settings never finished starting")
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        if result.get("failed"):
+            raise RuntimeError("granted %s; could not grant %s" % (
+                ", ".join(result.get("granted", [])) or "nothing",
+                ", ".join(result["failed"])))
+        return "OK %s" % (", ".join(result.get("granted", [])) or "nothing declared")
+
+    def front(self, bundle):
+        """OK when <bundle> is the app on screen. Read from the device, nothing injected."""
+        app = self.device.get_frontmost_application()
+        if app is None or app.identifier != bundle:
+            raise RuntimeError("%s is in front, not %s"
+                               % (app.identifier if app else "nothing", bundle))
+        return "OK pid=%d" % app.pid
 
     def running(self, bundle):
         pid = self.app_pid(bundle)
@@ -310,11 +372,19 @@ def main():
         return 1
     out("READY")
 
-    verbs = {"open": driver.open, "find": driver.find, "tap": driver.tap,
+    verbs = {"open": driver.open, "attach": lambda b: driver.open(b, restart=False),
+             "find": driver.find, "tap": driver.tap,
              "dump": driver.dump, "scroll": driver.scroll,
-             "running": driver.running, "url": driver.url,
+             "running": driver.running, "front": driver.front, "grant": driver.grant, "url": driver.url,
+             "service": driver.use_service,
              "launch": lambda b: "OK pid=%d" % driver.launch(b)}
-    for line in sys.stdin:
+    # readline(), not `for line in sys.stdin`: the iterator protocol reads ahead, and the
+    # first command after startup intermittently went unseen. u2driver.py uses the same
+    # idiom for the same reason.
+    while True:
+        line = sys.stdin.readline()
+        if not line:                         # EOF
+            break
         line = line.strip()
         if not line or line == "quit":
             break
