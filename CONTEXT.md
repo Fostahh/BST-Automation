@@ -154,8 +154,7 @@ nothing in `lib/ios` knows about adb.
 
 | Item | Status | Next step |
 |---|---|---|
-| iOS case 5: choosing the dylib in the file picker | **In progress, not committed.** The file gets ticked, but the picker stays open after Open, so the file never reaches TrollFools. | Debug on the phone: confirm the tick registers in the picker's selection before Open is tapped |
-| Commit case 5, the `iosdriver.py` `list` command, the `uitree.js` fix and the README row | Waiting on the item above | Commit once a full case 5 run passes |
+| iOS case 5: choosing the dylib in the file picker | **In progress.** Committed, marked UNFINISHED. The file gets ticked, but the picker stays open after Open, so the file never reaches TrollFools. | Debug on the phone: confirm the tick registers in the picker's selection before Open is tapped. The latest change (select through `didSelectItemAtIndexPath:` alone) is not yet verified. |
 | **Android case 6: Virtual Environment** | **Todo.** Not working at all; don't use it yet. The script still appears in the runner's menu. | Find out where it fails, then fix it |
 | **iOS case 1: Bootstrap + roothide** | **Todo** | • Confirm frida-server runs under roothide, because the tap layer depends on it<br>• Decide what the case *sets* and what it only *verifies*, following Android 1–3: read the state, change what differs, re-verify |
 | **iOS case 2: Dopamine + vnodebypass** | **Todo** | **vnodebypass blocks every frida injection** (measured), so nothing frida-driven can run once it's on. Order: grant permissions (`ios_grant`) → turn on vnodebypass last → launch the app. The reopen loop must not need frida. The case should end by telling the operator to turn vnodebypass off. |
