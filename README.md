@@ -8,6 +8,9 @@ use, launches the app, and lets the app's own RASP checks give the verdict. Done
 each state takes about ten minutes of tapping and comes out slightly different every time —
 which is exactly what makes manual results hard to trust.
 
+Each scenario's current status, the open work and the rules behind the design are in
+[CONTEXT.md](CONTEXT.md).
+
 ## Authorization
 
 The apps tested here belong to our **clients**, who have given us written permission to

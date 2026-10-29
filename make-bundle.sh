@@ -30,16 +30,18 @@ find "$STAGE/Automation" \( -name '*.bak' -o -name '.DS_Store' -o -name '*.apk' 
   # match itself when the finished script scans for the real marker below.
   cat <<'HDR'
 #!/usr/bin/env bash
-# bst-tools.sh — BST Android security-testing scenarios, self-contained (generated).
+# bst-tools.sh — BST Android and iOS security-testing scenarios, self-contained (generated).
 #
 #   ./bst-tools.sh      interactive: every choice is prompted (no arguments)
 #
-# Needs on this Mac: adb, python3 (always); frida (case 4); android-unpinner
+# Android needs on this Mac: adb, python3 (always); frida (case 4); android-unpinner
 # (case 5, also supplies aapt2); Android emulator + an AVD (case 8).
-# On every test device: MT Manager installed AND logged in.
-# Attach the phone and run it: the device is taken from `adb devices`, nothing to configure.
-# Case 4 needs your own .js frida hooks (none are bundled): keep a folder of them next
-# to this file and it is found automatically, or set HOOK_DIR=/path/to/your/hooks.
+# On every Android test device: MT Manager installed AND logged in.
+# iOS needs a jailbroken iPhone running frida-server, a python that can `import frida`,
+# and libimobiledevice (brew install libimobiledevice ideviceinstaller).
+# Attach the phone and run it: the device and its platform are detected, nothing to configure.
+# Android case 4 needs your own .js frida hooks (none are bundled): keep a folder of them
+# next to this file and it is found automatically, or set HOOK_DIR=/path/to/your/hooks.
 # First run offers to install uiautomator2 into ~/.bst-tools/venv (makes UI steps ~8x faster).
 set -euo pipefail
 MARK="__PAY""LOAD__"
