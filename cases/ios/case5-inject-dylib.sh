@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# NAME: iOS Case 5 — Inject Dylib (SSLKillSwitch via TrollFools)
+# NAME: iOS Case 5 — Inject Dylib (via TrollFools)
 #
-# Inject SSLKillSwitch2 into the app under test with TrollFools, then launch it. The app's
-# own RASP checks deliver the verdict — specifically whether it notices a foreign dylib in
-# its address space, and whether its pinning survives.
+# Inject a dylib into the app under test with TrollFools, then launch it. The app's
+# own RASP checks deliver the verdict — whether it notices a foreign dylib in its address
+# space.
 #
 # TrollFools re-signs the bundle in place, so the installed version does not change but the
 # binary does. There is nothing the device inventory can read that proves an injection
 # happened, which is why the log step below is not optional: TrollFools' own log is the
 # only evidence.
 #
-# The taps are real — frida drives TrollFools' UI (see lib/ios/ui.sh). The ONE step that
-# cannot be tapped is choosing the dylib: that file picker is a remote view belonging to
-# another process, so nothing inside TrollFools can reach it. That step asks you.
+# The taps are real — frida drives TrollFools' UI (see lib/ios/ui.sh), and the file
+# picker's too: it belongs to another process, which the driver attaches to directly. The
+# .dylib files in the folder the picker opens are listed, and you choose one.
 #
 #   env: TARGET_PKG=<bundle id>   DEV_SERIAL=<device udid>   (run-scenarios.sh sets both)
-#        DYLIB=<name>             the dylib to inject (default SSLKillSwitch22.dylib)
+#        DYLIB=<name>             choose this dylib without asking (unattended runs)
 #        TROLLFOOLS_ID=<bundle>   TrollFools itself (default wiki.qaq.TrollFools)
 #        TROLLFOOLS_SCOPE=All     which scope tab lists the app: All, User, TrollStore, System
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/../../lib/ios/device.sh"
 
-DYLIB="${DYLIB:-SSLKillSwitch22.dylib}"
+DYLIB="${DYLIB:-}"
 TROLLFOOLS_ID="${TROLLFOOLS_ID:-wiki.qaq.TrollFools}"
 TROLLFOOLS_SCOPE="${TROLLFOOLS_SCOPE:-All}"
 
@@ -35,7 +35,7 @@ fi
 echo
 echo "iOS Case 5 — Inject Dylib on ${DEV_NAME:-$DEV_SERIAL}"
 echo "  target: $PKG"
-echo "  dylib:  $DYLIB"
+echo "  dylib:  ${DYLIB:-chosen from the picker}"
 
 # --- the opening every iOS case shares ----------------------------------------
 ios_general_rules "$PKG" || exit 1
@@ -68,13 +68,55 @@ step "Tap Inject"
 ios_tap_req Inject || exit 1
 nap "$NAP_MED"
 
-# The one step that stays manual, and not for lack of trying: tapping Inject opens
-# UIDocumentPickerViewController, which draws in another process and arrives here as an
-# empty _UIRemoteView. Nothing running inside TrollFools can see or touch its contents.
-step "Choose $DYLIB in the file picker"
-detail "set DYLIB=<name> to inject something else"
-detail "this picker belongs to another process — it is the one thing here nothing can tap"
-gate "chosen?"
+# Inject opens a UIDocumentPickerViewController, which draws in its own process
+# (com.apple.DocumentManager.Service): TrollFools holds only an empty remote view of it.
+# So the driver attaches there, lists the .dylib files in whatever folder the picker
+# opened, and taps the one chosen.
+step "Choose the dylib in the file picker"
+ios_use_picker || exit 1
+ios_wait_for ".dylib" || {
+  echo "!! the picker's folder has no .dylib in it — put the dylib there and run again." >&2
+  exit 1
+}
+_ios_cmd 60 list .dylib || { echo "!! could not read the picker: $(_ios_why)" >&2; exit 1; }
+IFS=$'\t' read -r -a DYLIBS <<< "${IOS_UI_RESP#OK }"
+if [ -n "$DYLIB" ]; then
+  found=""
+  for name in "${DYLIBS[@]}"; do
+    case "$name" in "$DYLIB"|"$DYLIB.dylib") found="$name" ;; esac
+  done
+  [ -n "$found" ] || {
+    echo "!! DYLIB=$DYLIB is not in the picker's folder; it has: ${DYLIBS[*]}" >&2
+    exit 1
+  }
+  DYLIB="$found"
+else
+  detail "dylibs in the picker:"
+  for i in "${!DYLIBS[@]}"; do detail "  $((i + 1))) ${DYLIBS[$i]%.dylib}"; done
+  while :; do
+    read -rp "      choose a dylib [1]: " ans || { echo; echo "   no answer — stopping." >&2; exit 1; }
+    idx="$(pick_index "${#DYLIBS[@]}" "${ans:-1}")" && break
+    echo "      choose 1-${#DYLIBS[@]}." >&2
+  done
+  DYLIB="${DYLIBS[$((idx - 1))]}"
+fi
+# The picker takes several files: a tap only TICKS one, and Open (top right) is what
+# hands the selection to TrollFools.
+ios_tap_req "$DYLIB" || exit 1
+TAPPED="${IOS_UI_RESP#OK }"
+nap "$NAP_SHORT"                                # the tick lands and Open becomes enabled
+ios_tap_req Open || exit 1
+# A tap the picker ignored still reports success, so the proof is the picker CLOSING.
+# Still on screen a few seconds after Open means nothing was chosen.
+n=0
+while ios_find "$DYLIB" >/dev/null 2>&1 && [ "$n" -lt 10 ]; do sleep 0.5; n=$((n + 1)); done
+if [ "$n" -ge 10 ]; then
+  echo "!! the picker is still open — $DYLIB was not chosen (tick: $TAPPED)." >&2
+  exit 1
+fi
+detail "chose $DYLIB"
+ios_use_app >/dev/null 2>&1 || true            # the picker is gone; back to TrollFools
+nap "$NAP_MED"
 
 # Not optional. TrollFools reports success in its log and nowhere else — the bundle id and
 # version are unchanged afterwards, so without this the case has no evidence that anything
@@ -112,5 +154,5 @@ ios_launch_checked "$PKG" || exit 1
 
 echo
 echo "iOS case 5 (Inject Dylib) done on ${DEV_NAME:-$DEV_SERIAL}"
-echo "  $DYLIB is in the bundle — watch whether the app detects it, and whether pinning holds"
+echo "  $DYLIB is in the bundle — watch whether the app detects it"
 reopen_loop "$PKG"

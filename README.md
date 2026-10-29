@@ -42,7 +42,7 @@ from inside the tool it is driving.
 | # | State | Detection under test |
 |---|-------|----------------------|
 | 4 | TestFlight build decrypted with TrollDecrypt, re-installed through TrollStore | re-signed debuggable build |
-| 5 | SSLKillSwitch injected into the bundle with TrollFools | foreign dylib in the address space, pinning |
+| 5 | a dylib of your choice injected into the bundle with TrollFools | foreign dylib in the address space |
 
 Needs a jailbroken iPhone running frida-server, a python that can `import frida`, and
 `libimobiledevice` for the app inventory (`brew install libimobiledevice ideviceinstaller`).

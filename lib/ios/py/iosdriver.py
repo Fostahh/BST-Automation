@@ -324,6 +324,19 @@ class Driver:
                 ", ".join(result["failed"])))
         return "OK %s" % (", ".join(result.get("granted", [])) or "nothing declared")
 
+    def list(self, suffix):
+        """The names on screen that end in <suffix>, tab-separated, in screen order — a
+        picker's files of one type, for the operator to choose from."""
+        names = []
+        for node in self.call("find", {"contains": suffix}).get("matches", []):
+            for said in (node.get("label"), node.get("text")):
+                said = one_line(said or "")
+                if said.lower().endswith(suffix.lower()) and said not in names:
+                    names.append(said)
+        if not names:
+            raise RuntimeError("nothing on screen ends in '%s'" % suffix)
+        return "OK " + "\t".join(names)
+
     def front(self, bundle):
         """OK when <bundle> is the app on screen. Read from the device, nothing injected."""
         app = self.device.get_frontmost_application()
@@ -375,7 +388,7 @@ def main():
     verbs = {"open": driver.open, "attach": lambda b: driver.open(b, restart=False),
              "find": driver.find, "tap": driver.tap,
              "dump": driver.dump, "scroll": driver.scroll,
-             "running": driver.running, "front": driver.front, "grant": driver.grant, "url": driver.url,
+             "running": driver.running, "front": driver.front, "list": driver.list, "grant": driver.grant, "url": driver.url,
              "service": driver.use_service,
              "launch": lambda b: "OK pid=%d" % driver.launch(b)}
     # readline(), not `for line in sys.stdin`: the iterator protocol reads ahead, and the
